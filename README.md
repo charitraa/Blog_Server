@@ -32,8 +32,6 @@ Mindful Blog-backend/
 ├── .gitignore
 ├── README.md
 ├── LICENSE
-├── docker-compose.yml
-├── .env.example
 ├── requirements.txt  # Python dependencies for Django
 ```
 
@@ -41,7 +39,7 @@ Mindful Blog-backend/
 
 ### 1️⃣ Clone the repo
 ```bash
-git clone https://github.com/username/Mindful Blog-backend.git
+git clone https://github.com/username/Mindful_Blog-backend.git
 cd Mindful Blog-backend
 ```
 
@@ -49,36 +47,6 @@ cd Mindful Blog-backend
 ```bash
 pip install -r requirements.txt
 ```
-
-### 3️⃣ Setup environment variables
-Copy `.env.example` → `.env` and update with your configs:
-```bash
-# Database Configuration (SQLite for development, PostgreSQL for production)
-DATABASE_URL=sqlite:///db.sqlite3
-# PostgreSQL example (uncomment for production)
-# DATABASE_URL=postgres://user:password@localhost:5432/Mindful Blog
-
-# Django Secret Key for Session-Based Authentication
-SECRET_KEY=your-django-secret-key-here
-
-# Cloudinary for Image Uploads
-CLOUDINARY_URL=cloudinary://api_key:api_secret@cloud_name
-CLOUDINARY_CLOUD_NAME=your-cloud-name
-CLOUDINARY_API_KEY=your-api-key
-CLOUDINARY_API_SECRET=your-api-secret
-
-# Backend API Configuration
-API_PORT=8000
-API_HOST=localhost
-
-# Optional: Email Service (e.g., SendGrid, for notifications)
-SENDGRID_API_KEY=your-sendgrid-api-key
-EMAIL_FROM=your-email@example.com
-
-# Other optional configurations
-DJANGO_DEBUG=True
-```
-
 ### 4️⃣ Run database migrations
 ```bash
 python manage.py makemigrations
@@ -97,7 +65,6 @@ pytest
 
 ## 📖 API Documentation
 - **Swagger Docs**: http://localhost:8000/api/docs
-- **Postman Collection**: `docs/postman_collection.json`
 
 ### Example Routes
 - `POST /api/auth/register` → Register user
@@ -125,18 +92,18 @@ pytest
 
 4. **Configure the WSGI File**  
    - Update the WSGI configuration file (under the "Web" tab in PythonAnywhere) to point to your Django project's `wsgi.py`.  
-   - Example `wsgi.py` path: `/home/yourusername/Mindful Blog-backend/Mindful Blog/wsgi.py`.
+   - Example `wsgi.py` path: `/home/yourusername/Mindful Blog-backend/Mindful_Blog/wsgi.py`.
 
 5. **Set Up Environment Variables**  
    In the PythonAnywhere "Web" tab, add environment variables from `.env.example`:  
    - `SECRET_KEY=your-django-secret-key-here`  
-   - `DATABASE_URL=sqlite:////home/yourusername/Mindful Blog-backend/db.sqlite3` (or PostgreSQL URL)  
+   - `DATABASE_URL=sqlite:////home/yourusername/Mindful_Blog/db.sqlite3` (or PostgreSQL URL)  
    - `CLOUDINARY_URL`, `SENDGRID_API_KEY`, etc., as needed.
 
 6. **Run Migrations**  
    In the PythonAnywhere Bash console:  
    ```bash
-   cd /home/yourusername/Mindful Blog-backend
+   cd /home/yourusername/Mindful_Blog
    python manage.py makemigrations
    python manage.py migrate
    ```
@@ -162,8 +129,8 @@ We ❤️ contributions! Please follow these steps to ensure a smooth contributi
    Click the "Fork" button on the Mindful Blog Backend GitHub repository.  
    Clone your forked repository to your local machine:  
    ```bash
-   git clone https://github.com/your-username/Mindful Blog-backend.git
-   cd Mindful Blog-backend
+   git clone https://github.com/your-username/Mindful_Blog.git
+   cd Mindful_Blog
    ```
 
 2. **Set Up the Development Environment**  
@@ -241,39 +208,6 @@ We ❤️ contributions! Please follow these steps to ensure a smooth contributi
 - Describe the feature, its use case, and any implementation ideas.  
 - Tag it with the `enhancement` label.
 
-## 🔧 Environment Variables
-```bash
-# .env.example
-# Copy this file to .env and update with your actual configuration values.
-# DO NOT commit .env to version control.
-
-# Database Configuration
-# SQLite example (development)
-DATABASE_URL=sqlite:///db.sqlite3
-# PostgreSQL example (production)
-# DATABASE_URL=postgres://user:password@localhost:5432/Mindful Blog
-
-# Django Secret Key for Session-Based Authentication
-SECRET_KEY=your-django-secret-key-here
-
-# Cloudinary for Image Uploads
-CLOUDINARY_URL=cloudinary://api_key:api_secret@cloud_name
-CLOUDINARY_CLOUD_NAME=your-cloud-name
-CLOUDINARY_API_KEY=your-api-key
-CLOUDINARY_API_SECRET=your-api-secret
-
-# Backend API Configuration
-API_PORT=8000
-API_HOST=localhost
-
-# Optional: Email Service (e.g., SendGrid, for notifications)
-SENDGRID_API_KEY=your-sendgrid-api-key
-EMAIL_FROM=your-email@example.com
-
-# Other optional configurations
-DJANGO_DEBUG=True
-```
-
 ## 📜 Code of Conduct
 
 ### Our Pledge
@@ -325,7 +259,6 @@ The Mindful Blog Backend project actively maintains security updates for the fol
 |----------|--------------------|
 | main     | ✅                 |
 | v1.x.x   | ✅                 |
-| < v1.0   | ❌                 |
 
 ### Reporting a Vulnerability
 If you discover a security vulnerability in Mindful Blog Backend, we encourage responsible disclosure. Please follow these steps:  
@@ -366,19 +299,12 @@ To ensure the security of your Mindful Blog Backend deployment:
 - **API Security**: Use Django REST Framework’s throttling and input validation to prevent abuse.  
 - **Session Security**: Set `SESSION_COOKIE_SECURE=True` and `CSRF_COOKIE_SECURE=True` in production.
 
-## 📅 Roadmap
-- Add likes & reactions on posts
-- Email notifications for comments
-- Multi-language support
-- API rate limiting improvements
-- Enhanced admin dashboard analytics
-
 ## 📜 License
 Distributed under the MIT License. See `LICENSE` for details.
 
 ## 📬 Contact
-- 👤 Your Name – [@your_twitter](https://x.com/your_twitter)
-- 📧 your.email@example.com
-- 🌐 [Portfolio/Website](https://your-portfolio-website.com)
+- 👤 Your Name – [@_charitraa_](https://www.instagram.com/_charitraa_/)
+- 📧 stharabi9862187405@gmail.com
+- 🌐 [Portfolio/Website](https://www.charitrashrestha.com.np)
 
 ⭐ If you like this project, don’t forget to star the repo!
