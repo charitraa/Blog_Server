@@ -303,7 +303,7 @@ To ensure the security of your Mindful Blog Backend deployment:
 Distributed under the MIT License. See `LICENSE` for details.
 
 ## 📬 Contact
-- 👤 Your Name – [@_charitraa_](https://www.instagram.com/_charitraa_/)
+- 👤 [@_charitraa_](https://www.instagram.com/_charitraa_/)
 - 📧 stharabi9862187405@gmail.com
 - 🌐 [Portfolio/Website](https://www.charitrashrestha.com.np)
 
