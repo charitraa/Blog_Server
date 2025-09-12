@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
-from post.models import Post
+from apps.post.models import Post
 import uuid
 
 class Comment(models.Model):

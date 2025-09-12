@@ -1,7 +1,7 @@
 # serializers.py
 from rest_framework import serializers
 from .models import Post
-from user.serializers import UserCreateSerializer  # Adjust the import path as needed
+from apps.user.serializers import UserCreateSerializer  # Adjust the import path as needed
 
 class PostSerializer(serializers.ModelSerializer):
     class Meta:

@@ -1,0 +1,9 @@
+# .env
+SECRET_KEY=django-insecure-= 'your-secret-key'
+DEBUG='True or False'
+
+GITHUB_SECRET='your-github-secret'
+GITHUB_CLIENT_ID='your-github-client-id'
+
+EMAIL_HOST_USER='your-email-host-user'
+EMAIL_HOST_PASSWORD='your-email-host-password'

@@ -11,9 +11,10 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 
-from datetime import timedelta
 from pathlib import Path
 import os
+from decouple import config
+import rest_framework
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -22,12 +23,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-=xfp*ir4far+adwb0gtubwf5v_5qz6*p9i&-w=zi8-fgazc$=t'
+SECRET_KEY = config('SECRET_KEY')
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -40,11 +40,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'djoser',
+    # 'djoser',
     'corsheaders',
-    'user',
-    'post',
-    'comment',
+    'apps.user',
+    'apps.post',
+    'apps.comment',
 ]
 
 MIDDLEWARE = [
@@ -52,6 +52,8 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'blog_server.middleware.AllowOptionsMiddleware',
+    'blog_server.api_logging.APILoggingMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -144,56 +146,120 @@ REST_FRAMEWORK={
     'NON_FIELD_ERRORS_KEY':'error',
         'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework.authentication.SessionAuthentication',
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    )
+        # 'rest_framework_simplejwt.authentication.JWTAuthentication',
+        
+    ),
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 10,  # default per-page items
+    "EXCEPTION_HANDLER": "blog_server.exceptions.custom_exception_handler",
+     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
+      'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.AnonRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'user': '1000/day',
+        'anon': '100/day',
+    }
 }
 
 DOMAIN='localhost:3000'
 SITE_NAME = 'Henry Ultimate Authentication Course'
 
 # Simple JWT settings for customizing JWT authentication.
-SIMPLE_JWT = {
-    'AUTH_HEADER_TYPES': ('Bearer',),
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
-    "ROTATE_REFRESH_TOKENS": True,
-    "UPDATE_LAST_LOGIN": True,
-}   
+# SIMPLE_JWT = {
+#     'AUTH_HEADER_TYPES': ('Bearer',),
+#     "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
+#     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+#     "ROTATE_REFRESH_TOKENS": True,
+#     "UPDATE_LAST_LOGIN": True,
+# }   
 
-# Djoser settings for handling user authentication and account management via REST API.
-DJOSER = {
-    'LOGIN_FIELD': 'email',
-    'USER_CREATE_PASSWORD_RETYPE': False,
-    'USER_EMAIL_FIELD': 'email',
-    'ACTIVATION_URL': 'auth/activate/{uid}/{token}',
-    'SEND_ACTIVATION_EMAIL': False,
-    'SEND_CONFIRMATION_EMAIL': False,
-    'PASSWORD_CHANGED_EMAIL_CONFIRMATION':True,
-    'PASSWORD_RESET_CONFIRM_URL': 'auth/reset/confirm/{uid}/{token}',
-    'SET_PASSWORD_RETYPE': True,
-    'PASSWORD_RESET_SHOW_EMAIL_NOT_FOUND': True,
-    'TOKEN_MODEL': None,
-    'SERIALIZERS': {
-        'user_create': 'user.serializers.UserCreateSerializer',
-        'user': 'user.serializers.UserCreateSerializer',
-        'current_user': 'user.serializers.UserCreateSerializer',
-        'user_delete': 'djoser.serializers.UserDeleteSerializer',
-    },
-}
+# # Djoser settings for handling user authentication and account management via REST API.
+# DJOSER = {
+#     'LOGIN_FIELD': 'email',
+#     'USER_CREATE_PASSWORD_RETYPE': False,
+#     'USER_EMAIL_FIELD': 'email',
+#     'ACTIVATION_URL': 'auth/activate/{uid}/{token}',
+#     'SEND_ACTIVATION_EMAIL': False,
+#     'SEND_CONFIRMATION_EMAIL': False,
+#     'PASSWORD_CHANGED_EMAIL_CONFIRMATION':True,
+#     'PASSWORD_RESET_CONFIRM_URL': 'auth/reset/confirm/{uid}/{token}',
+#     'SET_PASSWORD_RETYPE': True,
+#     'PASSWORD_RESET_SHOW_EMAIL_NOT_FOUND': True,
+#     'TOKEN_MODEL': None,
+#     'SERIALIZERS': {
+#         'user_create': 'apps.user.serializers.UserCreateSerializer',
+#         'user': 'apps.user.serializers.UserCreateSerializer',
+#         'current_user': 'apps.user.serializers.UserCreateSerializer',
+#         'user_delete': 'djoser.serializers.UserDeleteSerializer',
+#     },
+# }
 
-GITHUB_SECRET="41559f93bbd93184db3734ee6f2a29e186c705e9"
-GITHUB_CLIENT_ID="Ov23li25dFk4MVOWg3e6"
+# GitHub
+GITHUB_SECRET = config('GITHUB_SECRET')
+GITHUB_CLIENT_ID = config('GITHUB_CLIENT_ID')
 
 # Email backend configuration for sending emails via SMTP.
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'charitra.shrestha@patancollege.edu.np'
-EMAIL_HOST_PASSWORD = 'iucfhsoqoaztwwiu'
-DEFAULT_FROM_EMAIL = 'charitra.shrestha@patancollege.edu.np'
+EMAIL_HOST_USER = config('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 
 # CORS settings to allow all origins, enabling cross-origin requests.
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS=True
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
+SESSION_COOKIE_HTTPONLY = True
+CORS_ALLOW_CREDENTIALS = True
+SESSION_COOKIE_SAMESITE = None
+CSRF_COOKIE_SAMESITE = None
+
+# for log files of errors and information
+from .logging_utils import SimpleColoredFormatter
+
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "simple_colored": {
+            "()": SimpleColoredFormatter,
+        },
+        "verbose": {  # For log files
+            "format": "[{asctime}] {levelname} [{name}:{lineno}] {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple_colored",  # Terminal output
+        },
+        "error_file": {
+            "class": "logging.FileHandler",
+            "filename": os.path.join(LOG_DIR, "errors.log"),
+            "formatter": "verbose",
+            "level": "ERROR",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "error_file"],
+            "level": "INFO",
+            "propagate": True,
+        },
+        "apps.user": {
+            "handlers": ["console", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
+

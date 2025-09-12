@@ -1,10 +1,11 @@
-from django.urls import path, include
-from .views import UserPhotoUpdateView , UserUpdateView
+from django.urls import path
+from .views import UserPhotoUpdateView , UserUpdateView, LoginView, CreateUserView, UserDetailView
 urlpatterns = [
-    path('auth/', include('djoser.urls')),
-    path('auth/', include('djoser.urls.jwt')),
+    path('create/', CreateUserView.as_view(), name='user-create'),
     path('photo/', UserPhotoUpdateView.as_view(), name='user-photo-update'),
     path('profile/update/', UserUpdateView.as_view(), name='user-update'),
+    path('login/', LoginView.as_view(), name='user-login'),
+    path('details/', UserDetailView.as_view(), name='user-detail'),
     # path('github/', GithubOauthSignInView.as_view(), name='github')
 
 ]
