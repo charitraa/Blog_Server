@@ -1,13 +1,37 @@
-/env
-/.env
-/logs
-*.log
-*__pycache__/
-*.pyc
+# Python
+__pycache__/
+*.py[cod]
 *.pyo
 *.pyd
+*.so
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+.env
+
+# Django stuff
+*.log
 db.sqlite3
-/media
+*.sqlite3
+media/
+staticfiles/
+
+# Django migrations (only keep __init__.py)
+*/migrations/*
+!*/migrations/__init__.py
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS files
 .DS_Store
-.vscode
-.idea
+Thumbs.db

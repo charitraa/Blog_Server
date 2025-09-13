@@ -1,19 +1,19 @@
 from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
 import random
 from django.core.mail import send_mail
 from django.utils import timezone
+from django.contrib.auth import get_user_model, authenticate
 from datetime import timedelta
 from apps.user.models import LoginCode
 from blog_server import settings
-from .serializers import UserPhotoUpdateSerializer , UserUpdateSerializer , UserSerializer, UserCreateSerializer
-from django.contrib.auth import get_user_model, authenticate
-from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
 from blog_server.permission import LoginRequiredPermission
+from .serializers import UserPhotoUpdateSerializer , UserUpdateSerializer , UserSerializer, UserCreateSerializer
+
 User = get_user_model()
 
 

@@ -1,5 +1,5 @@
 # .env
-SECRET_KEY=django-insecure-= 'your-secret-key'
+SECRET_KEY='django-insecure-=your-secret-key'
 DEBUG='True or False'
 
 GITHUB_SECRET='your-github-secret'
