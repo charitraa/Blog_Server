@@ -130,8 +130,48 @@ class UserUpdateView(generics.UpdateAPIView):
     queryset = User.objects.all()  
     serializer_class = UserUpdateSerializer  
     permission_classes = [LoginRequiredPermission]
+
     def get_object(self):
         return self.request.user
+
+    def perform_update(self, serializer):
+        """
+        Override perform_update to check if user changed their email.
+        If yes, send a verification code and set is_verified=False.
+        """
+        user = self.request.user
+        old_email = user.email
+        updated_user = serializer.save()
+
+        # If email was changed
+        if old_email != updated_user.email:
+            code = str(random.randint(100000, 999999))
+            LoginCode.objects.create(
+                user=updated_user,
+                code=code,
+                expires_at=timezone.now() + timedelta(minutes=10)
+            )
+
+            # Mark as unverified
+            updated_user.is_verified = False
+            updated_user.save()
+
+            # Send email
+            send_mail(
+                "Verify Your New Email Address",
+                f"Hello {updated_user.first_name},\n\n"
+                f"Your verification code for changing email is: {code}\n\n"
+                "If you did not request this change, please contact support.",
+                settings.DEFAULT_FROM_EMAIL,
+                [updated_user.email],
+                fail_silently=False,
+            )
+
+            return Response(
+                {"message": "Verification code sent to your new email. Please verify to activate it."},
+                status=status.HTTP_200_OK
+            )
+
     
 class CreateUserView(APIView):
     """
@@ -139,7 +179,7 @@ class CreateUserView(APIView):
     """
     def post(self, request, *args, **kwargs):
         serializer = UserCreateSerializer(data=request.data)
-        if serializer.is_valid(is_verified=False, raise_exception=True):
+        if serializer.is_valid(raise_exception=True):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
