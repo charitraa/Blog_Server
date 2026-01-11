@@ -11,10 +11,10 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 
+from datetime import timedelta
 from pathlib import Path
 import os
 from decouple import config
-import rest_framework
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -167,13 +167,12 @@ DOMAIN='localhost:3000'
 SITE_NAME = 'Henry Ultimate Authentication Course'
 
 # Simple JWT settings for customizing JWT authentication.
-# SIMPLE_JWT = {
-#     'AUTH_HEADER_TYPES': ('Bearer',),
-#     "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
-#     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
-#     "ROTATE_REFRESH_TOKENS": True,
-#     "UPDATE_LAST_LOGIN": True,
-# }   
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True
+}   
 
 # # Djoser settings for handling user authentication and account management via REST API.
 # DJOSER = {
