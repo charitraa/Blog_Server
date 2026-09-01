@@ -1,23 +1,48 @@
-from rest_framework.permissions import BasePermission
-from rest_framework.exceptions import NotAuthenticated
-from rest_framework_simplejwt.authentication import JWTAuthentication
+"""Reusable object-level permissions.
 
-class LoginRequiredPermission(BasePermission):
+Authorization is always decided here on the server. Nothing in these classes
+trusts a flag sent by the frontend.
+"""
+
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
+
+
+class LoginRequiredPermission(IsAuthenticated):
     """
-    Custom permission to return a specific message when the user is not authenticated.
+    Kept for backwards compatibility with the original cookie-based views.
+
+    Authentication itself now happens in
+    `apps.user.authentication.CookieOrHeaderJWTAuthentication`, which accepts
+    both an `Authorization: Bearer` header and the legacy `access_token`
+    cookie, so this only has to assert that somebody is signed in.
     """
 
-    def has_permission(self, request, view):
-        token = request.COOKIES.get("access_token")
-        if not token:
-            raise NotAuthenticated(detail="{ Login required }")
+    message = 'Authentication credentials were not provided.'
 
-        # Manually authenticate the user
-        auth = JWTAuthentication()
-        try:
-            validated_token = auth.get_validated_token(token)
-            request.user = auth.get_user(validated_token)  # Set the authenticated user
-        except Exception:
-            raise NotAuthenticated(detail="{ Invalid token }")
 
-        return True
+class IsAuthorOrReadOnly(BasePermission):
+    """Anyone may read; only the object's author (or staff) may modify it."""
+
+    message = 'You do not have permission to perform this action.'
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return obj.author_id == user.id or user.is_staff
+
+
+class IsSelfOrReadOnly(BasePermission):
+    """Anyone may read a profile; only its owner (or staff) may modify it."""
+
+    message = 'You do not have permission to perform this action.'
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return obj.pk == user.pk or user.is_staff

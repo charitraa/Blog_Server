@@ -1,76 +1,158 @@
 # Mindful Blog Backend
 
 ## About the Project
-Mindful Blog Backend is the server-side component of the Mindful Blog platform, a full-stack blog system where users can create, edit, and share articles with rich text support, comments, and session-based authentication. The backend is built with Django and REST Framework, designed to be scalable and suitable for integration with various frontends or as a foundation for larger CMS platforms.
+Mindful Blog Backend is the server-side component of the Mindful Blog platform: a
+publishing system with posts, drafts, categories, tags, likes, threaded comments,
+author profiles and dashboard statistics. It is built with Django and Django REST
+Framework and is consumed by the [Mindful Blog](https://github.com/charitraa/Mindful_Blog)
+React frontend.
 
 ## 🛠️ Tech Stack
-- **Backend**: Django (REST Framework)
-- **Database**: PostgreSQL / SQLite (for development)
-- **Authentication**: Django Session-Based Authentication
-- **Other Tools**: Docker, GitHub Actions, Pytest, PythonAnywhere (Free Tier)
+- **Framework**: Django 5.2 + Django REST Framework
+- **Database**: SQLite by default; MySQL/PostgreSQL via `DB_ENGINE` and friends
+- **Authentication**: JWT (`djangorestframework-simplejwt`) sent as a Bearer token,
+  with the refresh token mirrored into an httpOnly cookie
+- **Docs**: OpenAPI 3 via `drf-spectacular` (Swagger UI + ReDoc)
+- **Media**: Pillow, with uploads validated by decoding rather than by MIME type
+- **Sanitisation**: `bleach`, applied to post bodies on write
 
 ## ⚡ Features
-- ✍️ Create, edit, and delete blog posts
-- 🔒 Secure user authentication (Login/Register) using Django session-based auth
-- 🖼️ Rich text editor support with image upload (via Cloudinary)
-- 💬 Commenting system with replies
-- 👤 User profiles & author pages
-- 📊 Admin dashboard for managing content
-- 🚀 Deployed with PythonAnywhere (Free Tier) / Docker
+- ✍️ Full post CRUD with a draft → published lifecycle and stable, readable slugs
+- 🔒 JWT authentication with email **or** username login, refresh rotation and
+  server-side logout (token blacklisting + cookie clearing)
+- 📧 Optional email verification with one-time codes
+- 🗂️ Categories and tags, with filtering, full-text search and safe sorting
+- ❤️ Likes, made idempotent by a database unique constraint
+- 💬 Threaded comments (one level deep) with author-only edit/delete
+- 👤 Author profiles, follows, and per-author post listings
+- 📊 Dashboard statistics computed from real data
+- 👁️ Privacy-preserving view counting (salted, hashed fingerprints — no raw IPs)
+- 🛡️ Object-level permissions, scoped rate limiting, strict CORS and HTML sanitisation
+- 📖 Generated OpenAPI schema that matches the implementation
 
 ## 📂 Folder Structure
 ```bash
-Mindful Blog-backend/
-├── Mindful Blog/          # Django project settings
-├── apps/             # Django apps (e.g., posts, users, comments)
-│   ├── models/       # Database models
-│   ├── views/        # API views
-│   ├── urls/         # URL routes
-│   ├── tests/        # Unit & integration tests
-│   └── static/       # Static files (if served by Django)
-├── docs/             # API docs, Postman collections
-├── .gitignore
-├── README.md
-├── LICENSE
-├── requirements.txt  # Python dependencies for Django
+Blog_Server/
+├── blog_server/            # Project configuration
+│   ├── settings.py         # Environment-driven settings
+│   ├── urls.py             # Root URLConf (/api/ + legacy routes)
+│   ├── permission.py       # Reusable object-level permissions
+│   ├── pagination.py       # Shared pagination classes
+│   ├── validators.py       # Image upload validation
+│   ├── exceptions.py       # Consistent API error format
+│   └── api_logging.py      # Request logging with credential redaction
+├── apps/
+│   ├── user/               # Accounts, auth, profiles, follows
+│   │   ├── authentication.py   # Bearer-or-cookie JWT
+│   │   ├── backends.py         # Email-or-username sign-in
+│   │   ├── auth_urls.py        # /api/auth/
+│   │   ├── urls.py             # /api/users/
+│   │   └── legacy_urls.py      # /user/ compatibility aliases
+│   ├── post/               # Posts, categories, tags, likes, views
+│   │   ├── utils.py            # Sanitisation, slugs, reading time
+│   │   ├── filters.py          # Explicit, allowlisted query filters
+│   │   └── management/commands/seed_categories.py
+│   └── comment/            # Comments and replies
+├── media/                  # User uploads
+├── .env.example            # Copy to .env
+├── manage.py
+└── requirements.txt
 ```
 
 ## 🚀 Getting Started
 
 ### 1️⃣ Clone the repo
 ```bash
-git clone https://github.com/username/Mindful_Blog-backend.git
-cd Mindful Blog-backend
+git clone https://github.com/charitraa/Blog_Server.git
+cd Blog_Server
 ```
 
-### 2️⃣ Install dependencies
+### 2️⃣ Create a virtual environment and install dependencies
 ```bash
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+### 3️⃣ Configure the environment
+```bash
+cp .env.example .env
+```
+Then set `SECRET_KEY` in `.env`. Generate one with:
+```bash
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+```
+`.env.example` documents every supported variable. Nothing secret is hard-coded, and
+`CORS_ALLOWED_ORIGINS` must list your frontend origins — never a wildcard in production.
+
+Leaving `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` blank prints verification emails to the
+console instead of failing, which is usually what you want locally. Set
+`REQUIRE_EMAIL_VERIFICATION=False` to skip the code step entirely during development.
+
 ### 4️⃣ Run database migrations
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
+> **Upgrading an existing database?** Migrations are now tracked in git (they used to be
+> gitignored). If your database already has the old schema, run
+> `python manage.py migrate --fake-initial` once, then migrate normally.
 
-### 5️⃣ Run the app
+### 5️⃣ Seed the baseline categories
 ```bash
+python manage.py seed_categories
+```
+Categories are reference data the post editor needs. The command is idempotent.
+
+### 6️⃣ Create an admin user and run the app
+```bash
+python manage.py createsuperuser
 python manage.py runserver
 ```
+The API is then at http://localhost:8000 and the admin at http://localhost:8000/admin/.
 
 ## 🧪 Running Tests
 ```bash
-pytest
+python manage.py test
 ```
+The suite covers registration, login, verification, permissions, drafts, post CRUD and
+ownership, likes and duplicate prevention, comments and their authorization, categories,
+search, filtering, sorting, pagination, view-count deduplication, HTML sanitisation and
+the legacy routes.
 
 ## 📖 API Documentation
-- **Swagger Docs**: http://localhost:8000/api/docs
+- **Swagger UI**: http://localhost:8000/api/docs/
+- **ReDoc**: http://localhost:8000/api/redoc/
+- **Raw schema**: http://localhost:8000/api/schema/
+
+The schema is generated from the code, so it always matches the implementation.
+
+### Authentication
+Send `Authorization: Bearer <access token>`. `POST /api/auth/refresh/` rotates the token
+and also accepts the refresh token from its httpOnly cookie, so a browser client can keep
+the access token in memory and store nothing.
 
 ### Example Routes
-- `POST /api/auth/register` → Register user
-- `POST /api/auth/login` → Login user (returns session cookie)
-- `GET /api/posts` → Fetch all posts
-- `POST /api/posts` → Create a new post (requires session authentication)
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/auth/register/` | Create an account |
+| `POST` | `/api/auth/login/` | Sign in with email **or** username |
+| `POST` | `/api/auth/refresh/` | Rotate tokens |
+| `POST` | `/api/auth/logout/` | Blacklist the refresh token and clear cookies |
+| `GET`/`PATCH` | `/api/users/me/` | Read or update your profile |
+| `POST` | `/api/users/me/avatar/` | Upload a profile picture (multipart, field `photo`) |
+| `GET` | `/api/users/me/dashboard/` | Dashboard statistics |
+| `GET` | `/api/users/{username}/` | Public author profile |
+| `GET` | `/api/posts/` | List posts (`search`, `category`, `tag`, `author`, `ordering`, `page`) |
+| `POST` | `/api/posts/` | Create a post or draft |
+| `GET`/`PATCH`/`DELETE` | `/api/posts/{slug}/` | Read, update or delete (also accepts a UUID) |
+| `POST`/`DELETE` | `/api/posts/{slug}/like/` | Like or unlike |
+| `GET` | `/api/posts/trending/` | Engagement-ranked posts |
+| `GET`/`POST` | `/api/posts/{slug}/comments/` | Read or add comments |
+| `PATCH`/`DELETE` | `/api/comments/{id}/` | Edit or delete your own comment |
+| `GET` | `/api/categories/`, `/api/tags/` | Taxonomy |
+
+The original `/user/`, `/post/` and `/comment/` routes are still mounted as aliases onto
+these same views, so existing clients keep working.
 
 ## 🚀 Deploying to PythonAnywhere (Free Tier)
 1. **Create a PythonAnywhere Account**  

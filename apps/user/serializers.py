@@ -1,139 +1,277 @@
 from django.contrib.auth import get_user_model
-from rest_framework import serializers
-import random
-import string
 from django.contrib.auth.password_validation import validate_password
-# from .github import Github
-# from .helper import register_social_user
+from drf_spectacular.utils import extend_schema_field
+from rest_framework import serializers
+
+from .models import Follow, username_validator
 
 User = get_user_model()
 
-class UserCreateSerializer(serializers.ModelSerializer):
+
+def absolute_url(request, file_field):
+    """Absolute URL for a FileField, or None when nothing is stored."""
+    if not file_field:
+        return None
+    try:
+        url = file_field.url
+    except ValueError:
+        return None
+    return request.build_absolute_uri(url) if request else url
+
+
+class AuthorSerializer(serializers.ModelSerializer):
     """
-    Serializer for user registration with all required fields.
+    Compact author block embedded in posts and comments.
+
+    Only public fields: an email must never leak through a nested author.
     """
-    first_name = serializers.CharField(required=True)
-    last_name = serializers.CharField(required=True)
-    email = serializers.EmailField(required=True)
-    password = serializers.CharField(write_only=True, min_length=8, required=True)
-    confirm_password = serializers.CharField(write_only=True, min_length=8, required=True)
+
+    name = serializers.CharField(source='display_name', read_only=True)
+    avatar = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['first_name', 'last_name', 'email', 'password', 'confirm_password']
+        fields = ['id', 'username', 'name', 'avatar', 'headline']
+        read_only_fields = fields
 
-    def random_string(self, length):
-        letters = string.ascii_letters + string.digits
-        return ''.join(random.choice(letters) for i in range(length))
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_avatar(self, obj):
+        return absolute_url(self.context.get('request'), obj.photo)
+
+
+class UserPublicSerializer(AuthorSerializer):
+    """Public author profile, including the counters the profile page shows."""
+
+    post_count = serializers.SerializerMethodField()
+    follower_count = serializers.SerializerMethodField()
+    following_count = serializers.SerializerMethodField()
+    total_likes = serializers.SerializerMethodField()
+    is_following = serializers.SerializerMethodField()
+
+    class Meta(AuthorSerializer.Meta):
+        fields = AuthorSerializer.Meta.fields + [
+            'first_name', 'last_name', 'bio', 'city', 'district', 'date_joined',
+            'website', 'twitter', 'github', 'linkedin',
+            'post_count', 'follower_count', 'following_count', 'total_likes', 'is_following',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_post_count(self, obj):
+        # Views annotate this; the fallback keeps the serializer usable anywhere.
+        cached = getattr(obj, 'post_count', None)
+        if cached is not None:
+            return cached
+        return obj.author_post.filter(status='published').count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_follower_count(self, obj):
+        cached = getattr(obj, 'follower_count', None)
+        if cached is not None:
+            return cached
+        return obj.follower_set.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_following_count(self, obj):
+        cached = getattr(obj, 'following_count', None)
+        if cached is not None:
+            return cached
+        return obj.following_set.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_total_likes(self, obj):
+        cached = getattr(obj, 'total_likes', None)
+        if cached is not None:
+            return cached
+        from apps.post.models import Like
+        return Like.objects.filter(post__author=obj, post__status='published').count()
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_is_following(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or request.user.pk == obj.pk:
+            return False
+        return Follow.objects.filter(follower=request.user, following=obj).exists()
+
+
+class UserMeSerializer(UserPublicSerializer):
+    """The signed-in user's own record: public fields plus private ones."""
+
+    class Meta(UserPublicSerializer.Meta):
+        fields = UserPublicSerializer.Meta.fields + [
+            'email', 'date_of_birth', 'is_verified', 'is_staff', 'auth_provider',
+        ]
+        read_only_fields = fields
+
+
+class UserCreateSerializer(serializers.ModelSerializer):
+    """Registration."""
+
+    first_name = serializers.CharField(required=True, max_length=30)
+    last_name = serializers.CharField(required=True, max_length=30)
+    username = serializers.CharField(required=False, allow_blank=True, max_length=30,
+                                     validators=[username_validator])
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+    confirm_password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'password', 'confirm_password']
+        read_only_fields = ['id']
+
+    def validate_email(self, value):
+        value = value.lower().strip()
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError('A user with this email already exists.')
+        return value
+
+    def validate_username(self, value):
+        value = (value or '').strip()
+        if value and User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError('This username is already taken.')
+        return value
 
     def validate(self, attrs):
-        # Ensure passwords match
         if attrs['password'] != attrs['confirm_password']:
-            raise serializers.ValidationError({"message": "Passwords do not match."})
+            raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
 
-        # Validate password strength using Django’s built-in validators
-        validate_password(attrs['password'])
-
-        # Ensure email is unique
-        if User.objects.filter(email=attrs['email']).exists():
-            raise serializers.ValidationError({"message": "A user with this email already exists."})
+        # Run Django's validators with the user's own data so they can catch
+        # passwords that merely repeat the email or name.
+        candidate = User(
+            email=attrs['email'],
+            username=attrs.get('username') or '',
+            first_name=attrs['first_name'],
+            last_name=attrs['last_name'],
+        )
+        validate_password(attrs['password'], user=candidate)
         return attrs
 
     def create(self, validated_data):
         validated_data.pop('confirm_password')
-        user = User.objects.create_user(
+        username = (validated_data.pop('username', '') or '').strip()
+        return User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             first_name=validated_data['first_name'],
             last_name=validated_data['last_name'],
-            username=f"{validated_data['first_name']}_{self.random_string(3)}"
+            username=username or User.generate_username(validated_data['email']),
         )
-        return user
-    
-class UserSerializer(serializers.ModelSerializer):
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    """
+    Profile edit.
+
+    The field list is an explicit allowlist: `is_staff`, `is_superuser`,
+    `is_verified` and `password` are simply not assignable here, which closes
+    the mass-assignment path.
+    """
+
+    username = serializers.CharField(required=False, max_length=30, validators=[username_validator])
+
     class Meta:
         model = User
-        fields = '__all__'
-        exclude = ['password']
+        fields = [
+            'username', 'first_name', 'last_name', 'bio', 'headline',
+            'date_of_birth', 'district', 'city',
+            'website', 'twitter', 'github', 'linkedin',
+        ]
+
+    def validate_username(self, value):
+        value = value.strip()
+        if User.objects.filter(username__iexact=value).exclude(pk=self.instance.pk).exists():
+            raise serializers.ValidationError('This username is already taken.')
+        return value
+
+
+class EmailChangeSerializer(serializers.Serializer):
+    """Changing an email is separate: it needs re-verification."""
+
+    email = serializers.EmailField(required=True)
+
+    def validate_email(self, value):
+        value = value.lower().strip()
+        user = self.context['request'].user
+        if value == user.email:
+            raise serializers.ValidationError('This is already your email address.')
+        if User.objects.filter(email__iexact=value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError('This email is already in use.')
+        return value
+
 
 class UserPhotoUpdateSerializer(serializers.ModelSerializer):
+    photo = serializers.ImageField(required=True)
+
     class Meta:
         model = User
         fields = ['photo']
-        
+
     def validate_photo(self, value):
-        # 5 MB limit
-        max_size = 5 * 1024 * 1024
-        if value.size > max_size:
-            raise serializers.ValidationError("Photo size should not exceed 5MB.")
+        from blog_server.validators import validate_image_upload
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            validate_image_upload(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
         return value
 
-class UserUpdateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['email', 'first_name', 'last_name', 'username', 'date_of_birth', 'bio', 'district', 'city']
 
-    def update(self, instance, validated_data):
-        # Prevent email duplication
-        if 'email' in validated_data:
-            new_email = validated_data['email']
-            if User.objects.filter(email=new_email).exclude(id=instance.id).exists():
-                raise serializers.ValidationError({"email": "This email is already in use."})
-        
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        return instance
-
-
-# class GithubLoginSerializer(serializers.Serializer):
-#     code = serializers.CharField()
-
-#     def validate_code(self, code):
-#         print("Received Code: ", code)  # Debugging the received code
-        
-#         access_token = Github.exchange_code_for_token(code)
-        
-#         if not access_token:
-#             raise serializers.ValidationError("Invalid code or failed to get access token from GitHub.")
-        
-#         print("Access Token: ", access_token)  # Debugging the access token
-        
-#         user_data = Github.get_github_user(access_token)
-        
-#         if not user_data:
-#             raise serializers.ValidationError("Failed to fetch user data from GitHub.")
-        
-#         # Handle user data (name and email)
-#         full_name = user_data.get('name', '')
-#         email = user_data.get('email', '')
-#         names = full_name.split(" ")
-#         first_name = names[0] if len(names) > 0 else ''
-#         last_name = names[1] if len(names) > 1 else ''
-        
-#         provider = 'github'
-        
-#         # Register or get user
-#         return register_social_user(provider, email, first_name, last_name)
-
-class PasswordUpdateSerializer(serializers.ModelSerializer):
+class PasswordUpdateSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, required=True)
     new_password = serializers.CharField(write_only=True, required=True)
     new_password_confirm = serializers.CharField(write_only=True, required=True)
 
-    class Meta:
-        model = User
-        fields = ['current_password', 'new_password', 'new_password_confirm']
+    def validate_current_password(self, value):
+        if not self.context['request'].user.check_password(value):
+            raise serializers.ValidationError('Current password is incorrect.')
+        return value
 
     def validate(self, attrs):
-        user = self.instance
-        if not user.check_password(attrs['current_password']):
-            raise serializers.ValidationError({"message": "Current password is incorrect."})
         if attrs['new_password'] != attrs['new_password_confirm']:
-            raise serializers.ValidationError({"message": "New passwords do not match."})
-        validate_password(attrs['new_password'])
+            raise serializers.ValidationError({'new_password_confirm': 'New passwords do not match.'})
+        validate_password(attrs['new_password'], user=self.context['request'].user)
         return attrs
 
-    def update(self, instance, validated_data):
-        instance.set_password(validated_data['new_password'])
-        instance.save()
-        return instance
+    def save(self, **kwargs):
+        user = self.context['request'].user
+        user.set_password(self.validated_data['new_password'])
+        user.save(update_fields=['password'])
+        return user
+
+
+class LoginSerializer(serializers.Serializer):
+    """Accepts an email or a username under `email`, or an explicit `username`."""
+
+    email = serializers.CharField(required=False, allow_blank=True)
+    username = serializers.CharField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+
+    def validate(self, attrs):
+        identifier = (attrs.get('email') or attrs.get('username') or '').strip()
+        if not identifier:
+            raise serializers.ValidationError({'email': 'Email or username is required.'})
+        attrs['identifier'] = identifier
+        return attrs
+
+
+class VerifyEmailSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    code = serializers.CharField(required=True, min_length=6, max_length=6)
+
+
+class RefreshSerializer(serializers.Serializer):
+    refresh = serializers.CharField(required=False, allow_blank=True)
+
+
+class DashboardSerializer(serializers.Serializer):
+    """Shape of `GET /api/users/me/dashboard/`. Read-only."""
+
+    total_posts = serializers.IntegerField()
+    published_posts = serializers.IntegerField()
+    draft_posts = serializers.IntegerField()
+    total_views = serializers.IntegerField()
+    total_likes = serializers.IntegerField()
+    total_comments = serializers.IntegerField()
+    follower_count = serializers.IntegerField()
+    following_count = serializers.IntegerField()

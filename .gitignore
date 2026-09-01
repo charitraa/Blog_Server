@@ -10,7 +10,6 @@ __pycache__/
 *.spec
 */migrations/__pycache__/
 *.pyc
-migrations/
 # Virtual environment
 env/
 venv/
@@ -23,11 +22,11 @@ ENV/
 db.sqlite3
 *.sqlite3
 media/
+!media/**/default.*
 staticfiles/
 
-# Django migrations (only keep __init__.py)
-*/migrations/*
-!*/migrations/__init__.py
+# Migrations ARE tracked: they are the schema's source of truth and every
+# environment must apply the same ones.
 
 # IDE files
 .vscode/

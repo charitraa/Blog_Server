@@ -1,10 +1,9 @@
 from django.urls import path
-from .views import CommentListCreateView, CommentRetrieveUpdateDestroyView
+
+from .views import CommentDetailView, MyCommentListView, PostCommentListCreateView
 
 urlpatterns = [
-    # List and create comments for a specific post
-    path('posts/<uuid:post_id>/comments/', CommentListCreateView.as_view(), name='post-comments'),
-    
-    # Retrieve, update, or delete a specific comment
-    path('comments/<uuid:pk>/', CommentRetrieveUpdateDestroyView.as_view(), name='comment-detail'),
+    path('posts/<str:slug>/comments/', PostCommentListCreateView.as_view(), name='post-comments'),
+    path('comments/mine/', MyCommentListView.as_view(), name='comment-mine'),
+    path('comments/<uuid:pk>/', CommentDetailView.as_view(), name='comment-detail'),
 ]

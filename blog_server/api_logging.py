@@ -1,56 +1,72 @@
+"""Request/response logging.
+
+Two things this deliberately does *not* do:
+
+* read `request.body` — that consumes the stream and breaks multipart uploads,
+  and it would write credentials straight into `logs/errors.log`;
+* log any value belonging to a sensitive key. Only the field *names* are
+  recorded, so a failing request is still debuggable without leaking secrets.
+"""
+
 import json
 import logging
-from colorama import Fore, Style, init
+import time
 
-init(autoreset=True)  # Automatically reset color after each print
+logger = logging.getLogger('django')
 
-logger = logging.getLogger("django")
+# Field names whose values must never reach the logs.
+SENSITIVE_KEYS = {
+    'password',
+    'confirm_password',
+    'current_password',
+    'new_password',
+    'new_password_confirm',
+    'token',
+    'access',
+    'refresh',
+    'access_token',
+    'refresh_token',
+    'code',
+    'authorization',
+}
+
+
+def _redact(payload):
+    """Return `payload` with the value of every sensitive key masked."""
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: '[redacted]' if key.lower() in SENSITIVE_KEYS else value
+        for key, value in payload.items()
+    }
+
 
 class APILoggingMiddleware:
-    """
-    Logs incoming requests and outgoing responses in a clean, colored terminal output.
-    """
+    """Logs one line per request plus its outcome and duration."""
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        # Log request info
-        try:
-            body = request.body.decode("utf-8")
-            try:
-                body_json = json.loads(body) if body else {}
-            except Exception:
-                body_json = body
-        except Exception:
-            body_json = {}
-        if isinstance(body_json, dict):
-            pretty_body = json.dumps(body_json, indent=4)
-        else:
-            pretty_body = str(body_json)
-            
-        if request.method in ["POST", "PUT", "PATCH"]:
-            logger.info(f"{request.method} {request.path}")
-            logger.info(Fore.CYAN + f"INFO Request Body:\n{pretty_body}")
-        else:
-            logger.info(f"{request.method} {request.path}")
-            logger.info(Fore.CYAN + f"INFO Query Params:\n{json.dumps(request.GET.dict(), indent=4)}")
+        started = time.monotonic()
 
+        if request.method in ('GET', 'DELETE') and request.GET:
+            logger.info('%s %s params=%s', request.method, request.path,
+                        json.dumps(_redact(request.GET.dict())))
+        else:
+            logger.info('%s %s', request.method, request.path)
 
-        # Get response
         response = self.get_response(request)
 
-        # Log response info
+        duration_ms = (time.monotonic() - started) * 1000
+        message = '%s %s -> %s (%.0fms)'
+        args = (request.method, request.path, response.status_code, duration_ms)
+
         if response.status_code >= 500:
-            logger.error(f"{request.method} {request.path}")
-            logger.error(f"Response Status: {response.status_code}")
-
+            logger.error(message, *args)
         elif response.status_code >= 400:
-            logger.warning(f"{request.method} {request.path}")
-            logger.warning(f"Response Status: {response.status_code}")
-
+            logger.warning(message, *args)
         else:
-            logger.info(f"{request.method} {request.path}")
-            logger.info(f"Response Status: {response.status_code}")
+            logger.info(message, *args)
 
         return response

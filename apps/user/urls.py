@@ -1,15 +1,21 @@
 from django.urls import path
-from .views import UserPhotoUpdateView , UserUpdateView, LoginView, CreateUserView, UserAllDetailView, UserMeView, VerifyEmailView
+
+from apps.post.views import AuthorPostListView
+
+from . import views
+
+# Profile endpoints, mounted at /api/users/.
 urlpatterns = [
-    path('create/', CreateUserView.as_view(), name='user-create'),
-    path('photo/update/', UserPhotoUpdateView.as_view(), name='user-photo-update'),
-    path('details/update/', UserUpdateView.as_view(), name='user-update'),
-    path('login/', LoginView.as_view(), name='user-login'),
-    path('details/', UserAllDetailView.as_view(), name='user-detail'),
-    path('me/', UserMeView.as_view(), name='user-me'),
-    path('verify/', VerifyEmailView.as_view(), name='user-verify'),
+    path('', views.UserListView.as_view(), name='user-list'),
+    path('me/', views.MeView.as_view(), name='user-me'),
+    path('me/avatar/', views.MeAvatarView.as_view(), name='user-me-avatar'),
+    path('me/password/', views.MePasswordView.as_view(), name='user-me-password'),
+    path('me/email/', views.MeEmailView.as_view(), name='user-me-email'),
+    path('me/dashboard/', views.MeDashboardView.as_view(), name='user-me-dashboard'),
 
-
-    # path('github/', GithubOauthSignInView.as_view(), name='github')
-
+    path('<str:username>/', views.UserDetailView.as_view(), name='user-detail'),
+    path('<str:username>/posts/', AuthorPostListView.as_view(), name='user-posts'),
+    path('<str:username>/follow/', views.FollowView.as_view(), name='user-follow'),
+    path('<str:username>/followers/', views.UserFollowersView.as_view(), name='user-followers'),
+    path('<str:username>/following/', views.UserFollowingView.as_view(), name='user-following'),
 ]

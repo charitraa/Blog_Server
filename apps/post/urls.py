@@ -1,9 +1,19 @@
 from django.urls import path
+
 from . import views
 
+# Mounted under /api/ (see blog_server/urls.py). The legacy /post/ prefix is
+# mounted at the same views so existing clients keep working.
 urlpatterns = [
-    path('posts/', views.post_list, name='post_list'),  # List all posts or create a new post
-    path('posts/<str:id>/', views.post_detail, name='post_detail'),  # Retrieve, update, or delete a post by ID
-    path('posts/user/<int:user_id>/', views.posts_by_user, name='posts_by_user'),
-    path('posts/count/<int:user_id>/', views.counts_post_by_user, name='posts_by_user'),
+    path('posts/', views.PostListCreateView.as_view(), name='post-list'),
+    path('posts/mine/', views.MyPostListView.as_view(), name='post-mine'),
+    path('posts/trending/', views.TrendingPostListView.as_view(), name='post-trending'),
+    path('posts/<str:slug>/', views.PostDetailView.as_view(), name='post-detail'),
+    path('posts/<str:slug>/like/', views.PostLikeView.as_view(), name='post-like'),
+    path('posts/<str:slug>/related/', views.RelatedPostListView.as_view(), name='post-related'),
+
+    path('categories/', views.CategoryListView.as_view(), name='category-list'),
+    path('categories/<slug:slug>/', views.CategoryDetailView.as_view(), name='category-detail'),
+
+    path('tags/', views.TagListView.as_view(), name='tag-list'),
 ]
