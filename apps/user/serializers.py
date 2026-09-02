@@ -297,6 +297,9 @@ class SocialProviderSerializer(serializers.Serializer):
     name = serializers.CharField()
     authorize_url = serializers.CharField()
     client_id = serializers.CharField()
+    # The frontend puts this straight into the consent URL, so it has to be
+    # part of the documented response rather than an undeclared extra.
+    scope = serializers.CharField()
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):
