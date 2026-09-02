@@ -7,13 +7,14 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 
 from apps.post.feeds import AuthorFeed, CategoryFeed, LatestPostsAtomFeed, LatestPostsFeed
 from blog_server.sitemaps import SITEMAPS
-from blog_server.views import CheckView, RobotsView
+from blog_server.views import CheckView, RobotsView, SiteConfigView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', CheckView.as_view(), name='health-check'),
 
     # ---- Current API ----------------------------------------------------
+    path('api/config/', SiteConfigView.as_view(), name='site-config'),
     path('api/auth/', include('apps.user.auth_urls')),
     path('api/users/', include('apps.user.urls')),
     path('api/admin/', include('apps.user.admin_urls')),

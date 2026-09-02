@@ -367,3 +367,61 @@ class TopicFollowSerializer(serializers.Serializer):
     def get_name(self, obj):
         target = obj.category or obj.tag
         return target.name if target else ''
+
+
+class AccountDeletionSerializer(serializers.Serializer):
+    """
+    Confirming account deletion.
+
+    Two hurdles on purpose, because this is irreversible and cascades to
+    everything the person ever wrote:
+
+      * the current password, so a borrowed session cannot destroy an account;
+      * their username typed out, so the click is deliberate rather than a
+        misfire on a red button.
+
+    A social-only account has no usable password, so the typed username is the
+    whole confirmation there — asking for a password they were never given
+    would lock them out of their own deletion.
+    """
+
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    confirm_username = serializers.CharField()
+
+    def validate_confirm_username(self, value):
+        user = self.context['request'].user
+        if value.strip().lower() != user.username.lower():
+            raise serializers.ValidationError(
+                f'Type your username exactly — “{user.username}” — to confirm.'
+            )
+        return value
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+
+        if user.has_usable_password():
+            if not attrs.get('password'):
+                raise serializers.ValidationError(
+                    {'password': 'Enter your password to confirm.'}
+                )
+            if not user.check_password(attrs['password']):
+                raise serializers.ValidationError(
+                    {'password': 'That password is not correct.'}
+                )
+        return attrs
+
+
+class AccountSummarySerializer(serializers.Serializer):
+    """
+    What deleting the account will destroy.
+
+    Shown before the confirmation, because "are you sure?" is a much weaker
+    question than "this will delete 47 posts and 210 comments".
+    """
+
+    posts = serializers.IntegerField()
+    published_posts = serializers.IntegerField()
+    comments = serializers.IntegerField()
+    followers = serializers.IntegerField()
+    can_delete = serializers.BooleanField()
+    blocker = serializers.CharField(allow_blank=True)

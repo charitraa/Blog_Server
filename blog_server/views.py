@@ -43,3 +43,41 @@ class RobotsView(APIView):
             '',
         ]
         return HttpResponse('\n'.join(lines), content_type='text/plain')
+
+
+class SiteConfigView(APIView):
+    """
+    `GET /api/config/` — public settings the frontend needs before sign-in.
+
+    A single place for "what is switched on here", so the client does not need
+    a matching set of build-time environment variables that can drift out of
+    step with the server.
+
+    Only ever public values. The reCAPTCHA **site** key belongs here — it ships
+    in the HTML of every site that uses reCAPTCHA — while the secret never
+    leaves this server.
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        responses={200: {'type': 'object', 'properties': {
+            'site_name': {'type': 'string'},
+            'recaptcha_enabled': {'type': 'boolean'},
+            'recaptcha_site_key': {'type': 'string'},
+        }}},
+        summary='Public site configuration',
+    )
+    def get(self, request):
+        from django.conf import settings
+
+        from blog_server import captcha
+
+        enabled = captcha.is_enabled()
+        return JsonResponse({
+            'site_name': settings.SITE_NAME,
+            'recaptcha_enabled': enabled,
+            # Empty unless the guard is actually on, so the widget is never
+            # rendered against a key the server will not check.
+            'recaptcha_site_key': settings.RECAPTCHA_SITE_KEY if enabled else '',
+        })

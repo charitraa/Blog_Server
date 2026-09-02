@@ -187,6 +187,19 @@ class Post(models.Model):
     seo_description = models.CharField(max_length=200, blank=True)
     canonical_url = models.URLField(max_length=300, blank=True)
 
+    # An editor's feedback when a submission is sent back. Kept on the post so
+    # the writer sees why the moment they open it, rather than having to find a
+    # notification.
+    review_note = models.CharField(max_length=500, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_posts',
+    )
+
     # Unguessable key that lets an author share a draft for review without
     # publishing it. Rotating it revokes every link handed out so far.
     preview_token = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
@@ -635,3 +648,66 @@ class ReadingHistory(models.Model):
 
     def __str__(self):
         return f'{self.user} read {self.post}'
+
+
+class PostEmbedding(models.Model):
+    """
+    A post's meaning, as a vector, for semantic search and related posts.
+
+    Kept in its own table rather than a column on `Post` so that loading a post
+    never drags two thousand floats along with it — the vectors are only ever
+    wanted in bulk, by the search code.
+
+    `content_hash` is what makes regeneration cheap: an edit that changed only
+    the tags leaves the hash alone, so the embedding is not re-bought from the
+    provider for nothing.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.OneToOneField(Post, on_delete=models.CASCADE, related_name='embedding')
+
+    vector = models.JSONField(default=list)
+    # Stored so a model change can be detected and the index rebuilt, rather
+    # than silently comparing vectors from two different models.
+    model = models.CharField(max_length=100)
+    content_hash = models.CharField(max_length=64)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['model']),
+        ]
+
+    def __str__(self):
+        return f'embedding of {self.post.title}'
+
+    @staticmethod
+    def source_text(post):
+        """
+        What actually gets embedded.
+
+        Title and subtitle carry disproportionate meaning for their length, so
+        they lead. The body is truncated: embedding models have a context limit,
+        and the opening of an article is where its subject is established.
+        """
+        from .utils import plain_text
+
+        parts = [post.title, post.subtitle, post.excerpt, plain_text(post.content)[:4000]]
+        return '\n\n'.join(part for part in parts if part)
+
+    @staticmethod
+    def hash_for(post):
+        import hashlib
+
+        return hashlib.sha256(PostEmbedding.source_text(post).encode()).hexdigest()
+
+    @property
+    def is_stale(self):
+        """True when the post has changed, or the model has."""
+        from django.conf import settings
+
+        if self.model != settings.NVIDIA_EMBED_MODEL:
+            return True
+        return self.content_hash != PostEmbedding.hash_for(self.post)

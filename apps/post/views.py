@@ -39,7 +39,8 @@ from .serializers import (
     TagSerializer,
 )
 from .analytics import author_analytics, post_analytics
-from .utils import viewer_fingerprint
+from .search import related_by_meaning, semantic_search
+from .utils import plain_text, viewer_fingerprint
 
 logger = logging.getLogger('apps.post')
 
@@ -367,37 +368,36 @@ class RelatedPostListView(generics.ListAPIView):
     """
     GET /api/posts/<slug>/related/
 
-    Posts sharing the category or any tag, most recent first. Falls back to the
-    latest published posts when a post has neither, so the section is never empty.
+    Ranked by meaning when the post has an embedding, which finds genuinely
+    similar articles rather than ones that happen to share a tag. Falls back to
+    the tag and category query when there is no embedding — a new post is
+    related to something from the moment it is published, not once the index
+    catches up.
     """
 
-    queryset = Post.objects.none()  # for schema generation only
     serializer_class = PostListSerializer
     permission_classes = [AllowAny]
     pagination_class = None
+    filter_backends = []
+    queryset = Post.objects.none()  # for schema generation only
 
     def get_queryset(self):
-        post = get_object_or_404(Post.objects.published(), slug=self.kwargs['slug'])
-        base = annotated_posts(self.request).filter(status=Post.Status.PUBLISHED).exclude(pk=post.pk)
+        post = get_object_or_404(
+            Post.objects.visible_to(self.request.user), slug=self.kwargs['slug'],
+        )
+        visible = annotated_posts(self.request).exclude(pk=post.pk)
 
-        related = base.filter(
-            Q(category__isnull=False, category_id=post.category_id) | Q(tags__in=post.tags.all())
-        ).distinct()[:3]
+        matches, used_vectors = related_by_meaning(post, visible, limit=4)
+        if used_vectors and matches:
+            return matches
 
-        results = list(related)
-        if len(results) < 3:
-            seen = {item.pk for item in results} | {post.pk}
-            filler = base.exclude(pk__in=seen)[: 3 - len(results)]
-            results.extend(filler)
-        return results
+        # Fallback: shared tags, then the same category.
+        tag_ids = list(post.tags.values_list('id', flat=True))
+        fallback = visible.filter(
+            Q(tags__id__in=tag_ids) | Q(category=post.category)
+        ).distinct()
+        return fallback.order_by('-published_at')[:4]
 
-
-# ---------------------------------------------------------------------------
-# Legacy compatibility
-# ---------------------------------------------------------------------------
-# The original API addressed authors by primary key under /post/posts/user/<id>/.
-# These views keep those URLs answering, now with the same visibility rules as
-# the rest of the API, so an old client cannot see drafts it should not.
 
 class LegacyAuthorPostListView(generics.ListAPIView):
     """GET /post/posts/user/<user_id>/ — posts by author primary key."""
@@ -1123,3 +1123,211 @@ class AuthorAnalyticsView(APIView):
     def get(self, request):
         data = author_analytics(request.user, _requested_days(request))
         return Response(AuthorAnalyticsSerializer(data).data)
+
+
+class SemanticSearchView(generics.ListAPIView):
+    """
+    GET /api/posts/search/?q=...
+
+    Ranks by meaning rather than by shared words, so "how do I stop XSS" finds
+    an article titled "Preventing cross-site scripting".
+
+    Degrades rather than fails: with no index or no API key it falls back to the
+    existing keyword search, and says which one ran via the `semantic` flag so
+    the UI can be honest about it rather than implying a capability it did not
+    use.
+    """
+
+    serializer_class = PostListSerializer
+    permission_classes = [AllowAny]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = Post.objects.none()  # for schema generation only
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter('q', str, required=True, description='What to search for.'),
+            OpenApiParameter('semantic', bool, required=False,
+                             description='Set false to force keyword search.'),
+        ],
+        responses={200: PostListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        query = (self.request.query_params.get('q') or '').strip()
+        visible = annotated_posts(self.request)
+
+        if not query:
+            return visible.none()
+
+        wants_semantic = self.request.query_params.get('semantic', 'true') != 'false'
+        if wants_semantic:
+            matches, used = semantic_search(query, visible, limit=50)
+            self._used_semantic = used
+            if used and matches:
+                return matches
+
+        self._used_semantic = False
+        # Keyword fallback across the same fields the list endpoint searches.
+        return visible.filter(
+            Q(title__icontains=query)
+            | Q(excerpt__icontains=query)
+            | Q(content__icontains=query)
+            | Q(tags__name__icontains=query)
+        ).distinct()
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        # Tell the client which kind of search actually ran.
+        if isinstance(response.data, dict):
+            response.data['semantic'] = getattr(self, '_used_semantic', False)
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Editorial workflow
+# ---------------------------------------------------------------------------
+
+class SubmitForReviewView(APIView):
+    """
+    POST /api/posts/<slug>/submit/ — hand a draft to an editor.
+
+    The route out of the contributor dead end: someone who may write but not
+    publish needs a way to say "this is ready", or their work simply sits in a
+    drafts list nobody looks at.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostAuthorDetailSerializer
+
+    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    def post(self, request, slug):
+        post = get_object_or_404(Post.objects.all(), slug=slug, deleted_at__isnull=True)
+
+        if post.author_id != request.user.id and not request.user.can_edit_others:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if post.status == Post.Status.PUBLISHED:
+            return Response({'detail': 'That post is already published.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if len(plain_text(post.content)) < 20:
+            return Response({'detail': 'Write a little more before submitting it.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        post.status = Post.Status.IN_REVIEW
+        # A resubmission clears the previous feedback: it referred to a version
+        # that no longer exists, and leaving it on screen reads as unaddressed.
+        post.review_note = ''
+        post.save(update_fields=['status', 'review_note'])
+
+        notify_editors_of_submission(post, request.user)
+        return Response(PostAuthorDetailSerializer(post, context={'request': request}).data)
+
+
+class ReviewQueueView(generics.ListAPIView):
+    """
+    GET /api/posts/review-queue/ — submissions waiting on a decision.
+
+    Editors and above. Oldest first, because a queue people take from the top
+    of is a queue where the oldest item never moves.
+    """
+
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = Post.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        if not self.request.user.can_edit_others:
+            return Post.objects.none()
+        return (
+            Post.objects.filter(status=Post.Status.IN_REVIEW, deleted_at__isnull=True)
+            .with_related().with_counts().order_by('updated_at')
+        )
+
+
+class ReviewDecisionView(APIView):
+    """
+    POST /api/posts/<slug>/review/ — approve a submission or send it back.
+
+    Approving publishes it under the writer's own byline; the editor's name is
+    recorded in `reviewed_by` rather than replacing the author, because the
+    person who wrote it is the person who wrote it.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostAuthorDetailSerializer
+
+    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    def post(self, request, slug):
+        if not request.user.can_edit_others:
+            return Response({'detail': 'You do not have permission to review posts.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        post = get_object_or_404(Post.objects.all(), slug=slug, deleted_at__isnull=True)
+        action = request.data.get('action')
+        note = str(request.data.get('note', ''))[:500]
+
+        if action == 'approve':
+            post.status = Post.Status.PUBLISHED
+            post.review_note = ''
+        elif action == 'request_changes':
+            if not note.strip():
+                # Sending work back without saying why is not a review.
+                return Response(
+                    {'detail': 'Say what needs changing — a rejection without a reason is not useful.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            post.status = Post.Status.DRAFT
+            post.review_note = note
+        else:
+            return Response({'detail': 'Choose "approve" or "request_changes".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        post.reviewed_at = timezone.now()
+        post.reviewed_by = request.user
+        post.save()
+
+        notify_author_of_decision(post, request.user, action)
+        logger.info('%s %s post %s', request.user.username, action, post.slug)
+
+        return Response(PostAuthorDetailSerializer(post, context={'request': request}).data)
+
+
+def notify_editors_of_submission(post, author):
+    """Tell everyone who can publish that something is waiting."""
+    from django.contrib.auth import get_user_model
+
+    from apps.notification.models import Notification
+    from apps.user.models import ROLE_RANK, Role
+
+    User = get_user_model()
+    editor_roles = [role for role, rank in ROLE_RANK.items() if rank >= ROLE_RANK[Role.EDITOR]]
+
+    for editor in User.objects.filter(role__in=editor_roles, is_active=True).exclude(pk=author.pk):
+        try:
+            Notification.objects.get_or_create(
+                recipient=editor, actor=author,
+                verb=Notification.Verb.SUBMITTED, post=post, comment=None,
+            )
+        except Exception:
+            # A missing notification must not fail the submission itself.
+            logger.exception('Could not notify %s of a submission', editor.pk)
+
+
+def notify_author_of_decision(post, editor, action):
+    from apps.notification.models import Notification
+
+    verb = (Notification.Verb.APPROVED if action == 'approve'
+            else Notification.Verb.CHANGES)
+    try:
+        Notification.objects.update_or_create(
+            recipient_id=post.author_id, actor=editor, verb=verb, post=post, comment=None,
+        )
+    except Exception:
+        logger.exception('Could not notify the author of a review decision')

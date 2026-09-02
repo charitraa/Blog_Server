@@ -11,6 +11,8 @@ urlpatterns = [
     path('posts/mine/', views.MyPostListView.as_view(), name='post-mine'),
     path('posts/trending/', views.TrendingPostListView.as_view(), name='post-trending'),
     # Fixed segments must precede posts/<slug>/, or 'trash' is read as a slug.
+    path('posts/search/', views.SemanticSearchView.as_view(), name='post-search'),
+    path('posts/review-queue/', views.ReviewQueueView.as_view(), name='post-review-queue'),
     path('posts/trash/', views.TrashListView.as_view(), name='post-trash'),
     path('posts/feed/', views.FeedView.as_view(), name='post-feed'),
     path('posts/recommended/', views.RecommendedPostsView.as_view(), name='post-recommended'),
@@ -30,6 +32,8 @@ urlpatterns = [
          name='post-progress'),
     path('posts/<str:slug>/analytics/', views.PostAnalyticsView.as_view(),
          name='post-analytics'),
+    path('posts/<str:slug>/submit/', views.SubmitForReviewView.as_view(), name='post-submit'),
+    path('posts/<str:slug>/review/', views.ReviewDecisionView.as_view(), name='post-review'),
     path('posts/<str:slug>/ask/', AskAboutPostView.as_view(), name='post-ask'),
     # The action is pinned to a fixed set rather than <str:action>, which would
     # also swallow sibling routes like posts/<slug>/comments/.

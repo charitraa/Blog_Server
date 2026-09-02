@@ -141,11 +141,50 @@ class PostListSerializer(serializers.ModelSerializer):
 
 
 class PostDetailSerializer(PostListSerializer):
-    """List fields plus the sanitized article body."""
+    """
+    List fields plus the sanitized article body.
+
+    A members-only post withholds `content` from signed-out visitors and says
+    so through `is_locked`. Membership costs nothing — it means "has an
+    account" — so this is a reason to sign up, not a paywall.
+
+    The title, excerpt and cover are still returned: a locked article nobody
+    can see at all cannot be discovered or shared, which defeats the point.
+
+    Enforced here rather than in the view so every route that serializes a post
+    detail gets it for free, including ones added later.
+    """
+
+    is_locked = serializers.SerializerMethodField()
+    content = serializers.SerializerMethodField()
 
     class Meta(PostListSerializer.Meta):
-        fields = PostListSerializer.Meta.fields + ['content']
+        fields = PostListSerializer.Meta.fields + ['content', 'is_locked']
         read_only_fields = fields
+
+    def _may_read(self, obj):
+        request = self.context.get('request')
+        if obj.visibility != Post.Visibility.MEMBERS:
+            return True
+        if not request or not request.user.is_authenticated:
+            return False
+
+        # Any signed-in reader qualifies. The author and anyone who can edit
+        # other people's work would qualify anyway, so there is nothing further
+        # to check.
+        return True
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_is_locked(self, obj):
+        return not self._may_read(obj)
+
+    @extend_schema_field(serializers.CharField())
+    def get_content(self, obj):
+        if self._may_read(obj):
+            return obj.content
+        # An excerpt, not the article. Enough to judge whether it is worth
+        # paying for, not enough to be the article.
+        return ''
 
 
 class PostAuthorDetailSerializer(PostDetailSerializer):
@@ -161,6 +200,7 @@ class PostAuthorDetailSerializer(PostDetailSerializer):
     class Meta(PostDetailSerializer.Meta):
         fields = PostDetailSerializer.Meta.fields + [
             'preview_token', 'seo_title', 'seo_description', 'canonical_url',
+            'review_note', 'reviewed_at',
         ]
         read_only_fields = fields
 

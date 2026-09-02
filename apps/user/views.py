@@ -17,13 +17,17 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.post.models import Like, Post
+from blog_server import captcha
 from blog_server.pagination import StandardPagination
 
-from .models import Follow, LoginCode, PasswordResetToken, TopicFollow
+from .models import Follow, LoginCode, PasswordResetToken, Role, TopicFollow
 from .serializers import (
+    AccountDeletionSerializer,
+    AccountSummarySerializer,
     DashboardSerializer,
     EmailChangeSerializer,
     LoginSerializer,
@@ -159,6 +163,10 @@ class RegisterView(generics.CreateAPIView):
     throttle_scope = 'register'
 
     def create(self, request, *args, **kwargs):
+        # Checked before validation so a bot cannot use the field errors to
+        # enumerate which emails are already registered.
+        captcha.check(request, request.data.get('captcha'))
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
@@ -684,6 +692,10 @@ class PasswordResetRequestView(APIView):
 
     @extend_schema(request=PasswordResetRequestSerializer, responses={200: None})
     def post(self, request):
+        # This endpoint emails an address the requester chose, so it is a way
+        # to bomb somebody's inbox if left open.
+        captcha.check(request, request.data.get('captcha'))
+
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -818,3 +830,82 @@ class MyTopicsView(generics.ListAPIView):
         return TopicFollow.objects.filter(user=self.request.user).select_related(
             'category', 'tag'
         )
+
+
+class MeDeleteView(APIView):
+    """
+    GET    /api/users/me/delete/   what deletion would destroy
+    DELETE /api/users/me/delete/   destroy it
+
+    Deliberately not folded into `MeView` as a plain DELETE: the destructive
+    action gets its own URL, its own confirmation payload, and a preview
+    endpoint, so it cannot be reached by a stray request to a route that mostly
+    does something else.
+
+    Deletion is immediate and irreversible. The alternative — anonymising and
+    keeping the content — is a defensible product choice, but it is not what
+    "delete my account" means to the person asking, so it is not what happens.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = AccountDeletionSerializer
+    throttle_scope = 'auth'
+
+    @extend_schema(responses={200: AccountSummarySerializer})
+    def get(self, request):
+        from apps.comment.models import Comment
+        from apps.post.models import Post
+
+        user = request.user
+        posts = Post.objects.filter(author=user)
+
+        # A last super admin deleting themselves would leave nobody able to
+        # administer the site, so that one case is refused.
+        blocker = ''
+        if user.role == Role.SUPER_ADMIN:
+            others = User.objects.filter(role=Role.SUPER_ADMIN, is_active=True).exclude(pk=user.pk)
+            if not others.exists():
+                blocker = (
+                    'You are the only super admin. Promote someone else before '
+                    'deleting your account, or nobody will be able to administer this site.'
+                )
+
+        return Response(AccountSummarySerializer({
+            'posts': posts.count(),
+            'published_posts': posts.filter(status=Post.Status.PUBLISHED).count(),
+            'comments': Comment.objects.filter(author=user).count(),
+            'followers': Follow.objects.filter(following=user).count(),
+            'can_delete': not blocker,
+            'blocker': blocker,
+        }).data)
+
+    @extend_schema(request=AccountDeletionSerializer, responses={204: None})
+    def delete(self, request):
+        user = request.user
+
+        summary = self.get(request).data
+        if not summary['can_delete']:
+            return Response({'detail': summary['blocker']}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = AccountDeletionSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+
+        # Recorded before the row disappears, so the log still says who went.
+        logger.info(
+            'Account deleted: %s (%s) — %s posts, %s comments',
+            user.username, user.email, summary['posts'], summary['comments'],
+        )
+
+        # Kill the refresh tokens first. Deleting the user cascades them anyway,
+        # but doing it explicitly means a token in flight cannot be used during
+        # the delete itself.
+        try:
+            for token in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=token)
+        except Exception:
+            logger.exception('Could not blacklist tokens while deleting %s', user.pk)
+
+        user.delete()
+
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        return clear_auth_cookies(response)

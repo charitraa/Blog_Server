@@ -332,14 +332,27 @@ REFRESH_COOKIE_NAME = 'refresh_token'
 # Email
 # ---------------------------------------------------------------------------
 
+# Brevo (formerly Sendinblue) handles delivery when a key is present. It is
+# preferred over raw SMTP because it reports opens and clicks — a plain SMTP
+# server physically cannot, since tracking means rewriting links and embedding
+# a pixel, which only the sending service can do.
+BREVO_API_KEY = config('BREVO_API_KEY', default='')
+BREVO_SENDER_EMAIL = config('BREVO_SENDER_EMAIL', default='')
+BREVO_SENDER_NAME = config('BREVO_SENDER_NAME', default='')
+# The Brevo contact list confirmed newsletter subscribers are added to.
+BREVO_LIST_ID = config('BREVO_LIST_ID', default=0, cast=int)
+
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='').strip()
 # Google displays an app password as four groups of four ("abcd efgh ijkl mnop"),
 # but SMTP will not accept those spaces. Stripping them here means a password
 # pasted straight from the Google page works instead of failing as bad credentials.
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='').replace(' ', '').strip()
 
-# Without SMTP credentials, print emails to the console instead of failing.
-if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+# Brevo first, SMTP second, console last. The console fallback means a fresh
+# checkout with no credentials still runs and shows you the emails.
+if BREVO_API_KEY:
+    EMAIL_BACKEND = 'apps.newsletter.backends.BrevoEmailBackend'
+elif EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 else:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
@@ -423,6 +436,22 @@ GOOGLE_REDIRECT_URI = config(
 
 # How long an emailed password-reset link stays usable.
 PASSWORD_RESET_TTL_MINUTES = config('PASSWORD_RESET_TTL_MINUTES', default=30, cast=int)
+# ---------------------------------------------------------------------------
+# reCAPTCHA
+# ---------------------------------------------------------------------------
+#
+# Guards registration and the two endpoints that email an address the requester
+# chose. Off unless a secret is set, so development needs no keys.
+#
+# The site key is public by design — it ships in the HTML of every site using
+# reCAPTCHA. The secret is server-side only and must never reach the frontend.
+
+RECAPTCHA_ENABLED = config('RECAPTCHA_ENABLED', default=True, cast=bool)
+RECAPTCHA_SITE_KEY = config('RECAPTCHA_SITE_KEY', default='')
+RECAPTCHA_SECRET_KEY = config('RECAPTCHA_SECRET_KEY', default='')
+# Only consulted for v3 keys, which return a score. v2 sends none and is
+# judged on success alone. 0.5 is Google's suggested starting point.
+RECAPTCHA_MIN_SCORE = config('RECAPTCHA_MIN_SCORE', default=0.5, cast=float)
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +479,10 @@ NVIDIA_TRANSLATE_MODEL = config(
 NVIDIA_SAFETY_MODEL = config(
     'NVIDIA_SAFETY_MODEL', default='nvidia/llama-3.1-nemoguard-8b-content-safety',
 )
+# Powers semantic search and vector-based related posts. Chosen by measurement:
+# of the seven embedding models in the catalogue only two are enabled for this
+# account, and this one separated related from unrelated text most cleanly.
+NVIDIA_EMBED_MODEL = config('NVIDIA_EMBED_MODEL', default='nvidia/nemotron-3-embed-1b')
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +516,12 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # Throttling itself is covered by its own tests, which install a real cache.
 if 'test' in sys.argv:
     CACHES = {'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}}
+
+    # Likewise the CAPTCHA. Whether it is on would otherwise depend on which
+    # keys the developer running the suite happens to have in their own .env,
+    # so every guarded endpoint would pass or fail by accident. The tests that
+    # are actually about the CAPTCHA switch it on explicitly.
+    RECAPTCHA_ENABLED = False
 
 
 # ---------------------------------------------------------------------------

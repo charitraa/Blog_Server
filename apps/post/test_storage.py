@@ -137,3 +137,55 @@ class StorageConfigurationTests(APITestCase):
         body = str(response.data)
         self.assertNotIn('API_SECRET', body)
         self.assertNotIn('CLOUDINARY', body)
+
+
+class MembersOnlyTests(APITestCase):
+    """
+    Members-only posts.
+
+    Membership costs nothing — it means "has an account" — so this is a reason
+    to sign up, not a paywall.
+    """
+
+    def setUp(self):
+        self.author = User.objects.create_user(
+            email='a@example.com', username='author', password='StrongPass!234',
+            first_name='Ada', last_name='Lovelace', is_verified=True,
+        )
+        self.reader = User.objects.create_user(
+            email='r@example.com', username='reader', password='StrongPass!234',
+            first_name='Rea', last_name='Der', is_verified=True,
+        )
+        self.post = Post.objects.create(
+            title='Members piece', content=BODY, author=self.author,
+            status=Post.Status.PUBLISHED, visibility=Post.Visibility.MEMBERS,
+        )
+
+    def test_a_guest_is_locked_out_of_the_body(self):
+        response = self.client.get(f'/api/posts/{self.post.slug}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_locked'])
+        self.assertEqual(response.data['content'], '')
+
+    def test_a_locked_post_still_shows_enough_to_be_found(self):
+        response = self.client.get(f'/api/posts/{self.post.slug}/')
+        self.assertEqual(response.data['title'], 'Members piece')
+        self.assertTrue(response.data['excerpt'])
+
+    def test_any_signed_in_reader_can_read_it(self):
+        self.client.force_authenticate(self.reader)
+        response = self.client.get(f'/api/posts/{self.post.slug}/')
+        self.assertFalse(response.data['is_locked'])
+        self.assertIn('body long enough', response.data['content'])
+
+    def test_the_author_reads_their_own(self):
+        self.client.force_authenticate(self.author)
+        self.assertFalse(self.client.get(f'/api/posts/{self.post.slug}/').data['is_locked'])
+
+    def test_a_public_post_is_never_locked(self):
+        public = Post.objects.create(
+            title='Open', content=BODY, author=self.author, status=Post.Status.PUBLISHED,
+        )
+        response = self.client.get(f'/api/posts/{public.slug}/')
+        self.assertFalse(response.data['is_locked'])
+        self.assertIn('body long enough', response.data['content'])

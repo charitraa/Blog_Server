@@ -39,6 +39,9 @@ React frontend.
 - 📬 Newsletter with double opt-in and one-click unsubscribe
 - 🌐 RSS + Atom feeds, `sitemap.xml` and `robots.txt`, all pointing at the frontend
 - 🖼️ Cloudinary for uploaded media, so files survive a deploy on ephemeral hosts
+- 📮 Brevo for email delivery, with real newsletter open and click rates
+- 🤖 reCAPTCHA on registration, password reset and newsletter sign-up
+- 🔓 Members-only posts, free — "member" means "has an account", not "has paid"
 - 🤖 Optional AI assistant (NVIDIA NIM): titles, SEO, summaries, outlines,
   rewriting, proofreading, translation and reader Q&A
 - 📖 Generated OpenAPI schema that matches the implementation
@@ -231,6 +234,92 @@ python manage.py migrate_media_to_cloudinary --apply --model post.Post
 It never deletes local files, skips anything already on Cloudinary (so it is safe
 to re-run), and leaves a row untouched if its upload fails. Check the site before
 removing `media/` yourself — and keep a backup.
+
+## 📮 Email & newsletter (Brevo)
+
+[Brevo](https://brevo.com) (formerly Sendinblue) handles delivery when
+`BREVO_API_KEY` is set, and takes precedence over the SMTP settings.
+
+It slots in as a Django email backend, so **every existing `send_mail` call**
+— verification codes, password resets, newsletter confirmations — routes
+through it with no call site changing.
+
+```bash
+BREVO_API_KEY=xkeysib-...
+BREVO_SENDER_EMAIL=hello@yourdomain.com
+BREVO_SENDER_NAME=Marginalia
+BREVO_LIST_ID=2          # the contact list confirmed subscribers join
+```
+
+Backend selection is Brevo → SMTP → console, so a checkout with no credentials
+still runs and prints its emails to the terminal.
+
+### Why Brevo for open and click rates
+
+They are not something this server can measure. Tracking an open means
+embedding a pixel; tracking a click means rewriting every link — both can only
+be done by whatever actually sends the mail. A plain SMTP server hands the
+message to a mail server and learns nothing more.
+
+| Endpoint | Does |
+| --- | --- |
+| `GET`/`POST` `/api/newsletter/campaigns/` | List or draft a campaign (staff) |
+| `PATCH`/`DELETE` `/api/newsletter/campaigns/{id}/` | Edit or remove a **draft** |
+| `POST` `/api/newsletter/campaigns/{id}/send/` | Send to every confirmed subscriber |
+| `GET` `/api/newsletter/campaigns/{id}/stats/` | Refresh opens, clicks, bounces |
+
+Confirming a subscription adds the address to your Brevo list; unsubscribing
+removes it. A sent campaign can never be edited or deleted — the emails are
+already in inboxes, and letting the record drift would make the figures
+meaningless. Rates are calculated against *delivered*, not sent, because a
+bounce was never an opportunity to open.
+
+## 💳 Payments
+
+There are none, deliberately. Members-only posts are free: **"member" means
+"has an account"**, so a locked post is a reason to sign up rather than a
+paywall. No gateway, no card handling, nothing to reconcile.
+
+## 🛡️ reCAPTCHA (optional)
+
+Guards the three unauthenticated endpoints that either create an account or
+email an address the requester chose:
+
+| Endpoint | Why |
+| --- | --- |
+| `POST /api/auth/register/` | Bulk fake accounts |
+| `POST /api/auth/password-reset/` | Bombing somebody else's inbox |
+| `POST /api/newsletter/subscribe/` | Same, plus list poisoning |
+
+**Sign-in is deliberately not guarded.** A 20/hour throttle already covers
+password guessing, and a puzzle in front of every returning reader costs more
+in abandoned logins than it saves in blocked attempts.
+
+```bash
+RECAPTCHA_ENABLED=True
+RECAPTCHA_SITE_KEY=6Le...        # public; served to the frontend by /api/config/
+RECAPTCHA_SECRET_KEY=6Le...      # server-side only, never sent to the frontend
+RECAPTCHA_MIN_SCORE=0.5          # v3 only; v2 sends no score
+```
+
+Register a site at <https://www.google.com/recaptcha/admin>. Leave the secret
+blank and the guard switches off entirely, so development needs no keys and no
+widget is rendered.
+
+The same code handles **v2 and v3**: a score is checked when present and
+ignored when absent, so changing key type is configuration, not code.
+
+Two deliberate behaviours:
+
+- **It fails open when Google is unreachable.** A CAPTCHA outage must not
+  become a site outage — the throttles still apply, and locking every visitor
+  out of registering is the worse failure.
+- **The rejection reason goes to the log, never the response.** Telling a bot
+  precisely why it failed is free tuning advice.
+
+The frontend reads the site key from `GET /api/config/` rather than a
+build-time variable, so the two halves cannot drift apart about whether the
+guard is on.
 
 ## 🤖 AI assistant (optional)
 

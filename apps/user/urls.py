@@ -13,6 +13,7 @@ urlpatterns = [
     path('me/email/', views.MeEmailView.as_view(), name='user-me-email'),
     path('me/dashboard/', views.MeDashboardView.as_view(), name='user-me-dashboard'),
     path('me/analytics/', AuthorAnalyticsView.as_view(), name='user-me-analytics'),
+    path('me/delete/', views.MeDeleteView.as_view(), name='user-me-delete'),
 
     path('<str:username>/', views.UserDetailView.as_view(), name='user-detail'),
     path('<str:username>/posts/', AuthorPostListView.as_view(), name='user-posts'),
