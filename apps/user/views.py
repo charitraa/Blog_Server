@@ -4,12 +4,15 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
 from django.db.models import Count, Exists, OuterRef, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,13 +22,17 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.post.models import Like, Post
 from blog_server.pagination import StandardPagination
 
-from .models import Follow, LoginCode
+from .models import Follow, LoginCode, PasswordResetToken
 from .serializers import (
     DashboardSerializer,
     EmailChangeSerializer,
     LoginSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
     PasswordUpdateSerializer,
     RefreshSerializer,
+    SocialAuthSerializer,
+    SocialProviderSerializer,
     UserCreateSerializer,
     UserMeSerializer,
     UserPhotoUpdateSerializer,
@@ -33,6 +40,7 @@ from .serializers import (
     UserUpdateSerializer,
     VerifyEmailSerializer,
 )
+from .social import PROVIDERS, available_providers
 
 logger = logging.getLogger('apps.user')
 User = get_user_model()
@@ -523,3 +531,216 @@ class UserFollowingView(generics.ListAPIView):
     def get_queryset(self):
         target = get_object_or_404(User, username__iexact=self.kwargs['username'])
         return author_queryset().filter(follower_set__follower=target)
+
+
+# ---------------------------------------------------------------------------
+# Social sign-in
+# ---------------------------------------------------------------------------
+
+def user_from_social(profile):
+    """
+    Resolve a social profile onto an account, creating one if needed.
+
+    Matching is by verified email, which is what makes "sign in with GitHub"
+    land on the account someone originally registered by email. The providers
+    in `social.py` refuse to return an unverified address, so this cannot be
+    used to take over an account by claiming somebody else's email.
+    """
+    user = User.objects.filter(email__iexact=profile.email).first()
+    if user is not None:
+        # A social sign-in proves the address, so an unverified account becomes
+        # verified here rather than being sent through the email code again.
+        updates = []
+        if not user.is_verified:
+            user.is_verified = True
+            updates.append('is_verified')
+        if not user.first_name and profile.first_name:
+            user.first_name = profile.first_name[:30]
+            updates.append('first_name')
+        if not user.last_name and profile.last_name:
+            user.last_name = profile.last_name[:30]
+            updates.append('last_name')
+        if updates:
+            user.save(update_fields=updates)
+        return user, False
+
+    username = profile.username or User.generate_username(profile.email)
+    if User.objects.filter(username__iexact=username).exists():
+        username = User.generate_username(profile.email)
+
+    user = User.objects.create_user(
+        email=profile.email,
+        # No usable password: this account signs in through the provider. A
+        # password can still be set later through the reset flow.
+        password=None,
+        username=username,
+        first_name=profile.first_name[:30],
+        last_name=profile.last_name[:30],
+        is_verified=True,
+        auth_provider=profile.provider,
+    )
+    user.set_unusable_password()
+    user.save(update_fields=['password'])
+    return user, True
+
+
+class SocialAuthView(APIView):
+    """
+    POST /api/auth/social/<provider>/
+
+    Takes the one-time `code` from GitHub or Google, exchanges it server-side
+    and answers with the same token payload as a password login, so the
+    frontend treats every sign-in route identically.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = 'auth'
+    serializer_class = SocialAuthSerializer
+
+    @extend_schema(request=SocialAuthSerializer, responses={200: UserMeSerializer})
+    def post(self, request, provider):
+        provider_class = PROVIDERS.get((provider or '').lower())
+        if provider_class is None:
+            return Response(
+                {'detail': f'Unknown sign-in provider "{provider}".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = SocialAuthSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        redirect_uri = serializer.validated_data.get('redirect_uri') or None
+        # AuthenticationFailed from the provider is already a clean 401.
+        access_token = provider_class.exchange(serializer.validated_data['code'], redirect_uri)
+        profile = provider_class.profile(access_token)
+
+        user, created = user_from_social(profile)
+        if not user.is_active:
+            return Response({'detail': 'This account has been disabled.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        message = 'Account created.' if created else 'Login successful.'
+        return auth_response(user, request, message,
+                             status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class SocialProvidersView(APIView):
+    """
+    GET /api/auth/providers/
+
+    Lets the frontend render only the buttons this deployment can actually
+    honour, and hands it the client ids and authorize URLs so the OAuth
+    endpoints are not duplicated in the client.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = SocialProviderSerializer
+
+    @extend_schema(responses={200: SocialProviderSerializer(many=True)})
+    def get(self, request):
+        catalogue = {
+            'github': {
+                'authorize_url': 'https://github.com/login/oauth/authorize',
+                'client_id': settings.GITHUB_CLIENT_ID,
+                'scope': 'read:user user:email',
+            },
+            'google': {
+                'authorize_url': 'https://accounts.google.com/o/oauth2/v2/auth',
+                'client_id': settings.GOOGLE_CLIENT_ID,
+                'scope': 'openid email profile',
+            },
+        }
+        return Response([
+            {'name': name, **catalogue[name]}
+            for name in available_providers()
+            if name in catalogue
+        ])
+
+
+# ---------------------------------------------------------------------------
+# Forgotten passwords
+# ---------------------------------------------------------------------------
+
+class PasswordResetRequestView(APIView):
+    """
+    POST /api/auth/password-reset/
+
+    Always answers the same way, whether or not the address is registered, so
+    this cannot be used to discover which emails have accounts.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_scope = 'auth'
+    serializer_class = PasswordResetRequestSerializer
+
+    @extend_schema(request=PasswordResetRequestSerializer, responses={200: None})
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = User.objects.filter(
+            email__iexact=serializer.validated_data['email'], is_active=True
+        ).first()
+        if user is not None:
+            raw_token = PasswordResetToken.issue(user, settings.PASSWORD_RESET_TTL_MINUTES)
+            reset_url = f'{settings.FRONTEND_URL.rstrip("/")}/reset-password?token={raw_token}'
+            try:
+                send_mail(
+                    f'Reset your {settings.SITE_NAME} password',
+                    f'Hello {user.display_name},\n\n'
+                    'We received a request to reset your password. Open this link to choose a new one:\n\n'
+                    f'{reset_url}\n\n'
+                    f'The link expires in {settings.PASSWORD_RESET_TTL_MINUTES} minutes and can be used once.\n\n'
+                    'If you did not ask for this, you can ignore this email — your password will not change.',
+                    settings.DEFAULT_FROM_EMAIL,
+                    [user.email],
+                    fail_silently=False,
+                )
+            except Exception:
+                logger.exception('Failed to send a password reset email to user %s', user.pk)
+
+        return Response({
+            'message': 'If an account exists for that address, a reset link is on its way.'
+        })
+
+
+class PasswordResetConfirmView(APIView):
+    """POST /api/auth/password-reset/confirm/ — set a new password from the emailed token."""
+
+    permission_classes = [AllowAny]
+    throttle_scope = 'auth'
+    serializer_class = PasswordResetConfirmSerializer
+
+    @extend_schema(request=PasswordResetConfirmSerializer, responses={200: UserMeSerializer})
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Only the hash is stored, so the lookup hashes the incoming token too.
+        token_hash = PasswordResetToken.hash_token(serializer.validated_data['token'])
+        reset = PasswordResetToken.objects.select_related('user').filter(token_hash=token_hash).first()
+        if reset is None or not reset.is_usable:
+            return Response(
+                {'detail': 'This reset link is invalid or has expired.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = reset.user
+        try:
+            validate_password(serializer.validated_data['new_password'], user=user)
+        except DjangoValidationError as exc:
+            raise DRFValidationError({'new_password': list(exc.messages)})
+
+        user.set_password(serializer.validated_data['new_password'])
+        # Someone who can read the mailbox has proved they own the address.
+        if not user.is_verified:
+            user.is_verified = True
+        user.save(update_fields=['password', 'is_verified'])
+        reset.consume()
+
+        # Every other outstanding link is now void.
+        PasswordResetToken.objects.filter(user=user, used_at__isnull=True).update(
+            used_at=timezone.now()
+        )
+
+        return auth_response(user, request, 'Password updated. You are signed in.')

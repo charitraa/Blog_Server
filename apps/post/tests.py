@@ -5,7 +5,7 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.post.models import Category, Like, Post, PostView, Tag
+from apps.post.models import Bookmark, Category, EditorImage, Like, Post, PostView, Tag
 from apps.post.utils import build_excerpt, reading_time_minutes, sanitize_html
 
 User = get_user_model()
@@ -488,3 +488,209 @@ class LegacyRouteTests(APITestCase):
                 format='json',
             )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class BookmarkTests(APITestCase):
+    """Saving posts for later."""
+
+    def setUp(self):
+        self.author = make_user()
+        self.reader = make_user('reader@example.com', 'reader')
+        self.post = make_post(self.author)
+        self.url = f'/api/posts/{self.post.slug}/bookmark/'
+
+    def test_bookmarking_requires_sign_in(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_reader_can_bookmark_and_unbookmark(self):
+        self.client.force_authenticate(self.reader)
+
+        saved = self.client.post(self.url)
+        self.assertEqual(saved.status_code, status.HTTP_200_OK)
+        self.assertTrue(saved.data['is_bookmarked'])
+        self.assertEqual(Bookmark.objects.filter(user=self.reader).count(), 1)
+
+        removed = self.client.delete(self.url)
+        self.assertFalse(removed.data['is_bookmarked'])
+        self.assertEqual(Bookmark.objects.filter(user=self.reader).count(), 0)
+
+    def test_bookmarking_twice_creates_one_row(self):
+        self.client.force_authenticate(self.reader)
+        self.client.post(self.url)
+        self.client.post(self.url)
+        self.assertEqual(Bookmark.objects.filter(user=self.reader, post=self.post).count(), 1)
+
+    def test_unbookmarking_something_unsaved_is_not_an_error(self):
+        self.client.force_authenticate(self.reader)
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_bookmark_list_shows_only_my_saves(self):
+        other = make_post(self.author, title='Another post')
+        Bookmark.objects.create(post=self.post, user=self.reader)
+        Bookmark.objects.create(post=other, user=self.author)
+
+        self.client.force_authenticate(self.reader)
+        response = self.client.get('/api/bookmarks/')
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['slug'], self.post.slug)
+
+    def test_post_list_reports_bookmark_state(self):
+        Bookmark.objects.create(post=self.post, user=self.reader)
+        self.client.force_authenticate(self.reader)
+        response = self.client.get('/api/posts/')
+        self.assertTrue(response.data['results'][0]['is_bookmarked'])
+
+    def test_anonymous_reader_is_never_bookmarked(self):
+        response = self.client.get('/api/posts/')
+        self.assertFalse(response.data['results'][0]['is_bookmarked'])
+
+
+class DraftPreviewTests(APITestCase):
+    """Sharing an unpublished draft by link."""
+
+    def setUp(self):
+        self.author = make_user()
+        self.draft = make_post(self.author, title='Secret draft', status=Post.Status.DRAFT)
+        self.url = f'/api/posts/{self.draft.slug}/preview/'
+
+    def test_a_valid_token_reads_the_draft_without_signing_in(self):
+        response = self.client.get(self.url, {'token': str(self.draft.preview_token)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['title'], 'Secret draft')
+
+    def test_a_wrong_token_is_a_404(self):
+        import uuid
+        response = self.client.get(self.url, {'token': str(uuid.uuid4())})
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_a_missing_token_is_rejected(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_previewing_does_not_count_as_a_view(self):
+        self.client.get(self.url, {'token': str(self.draft.preview_token)})
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.view_count, 0)
+
+    def test_the_author_is_given_the_preview_token(self):
+        self.client.force_authenticate(self.author)
+        response = self.client.get(f'/api/posts/{self.draft.slug}/')
+        self.assertEqual(str(response.data['preview_token']), str(self.draft.preview_token))
+
+    def test_a_stranger_is_never_given_the_preview_token(self):
+        published = make_post(self.author, title='Public one')
+        stranger = make_user('stranger@example.com', 'stranger')
+        self.client.force_authenticate(stranger)
+        response = self.client.get(f'/api/posts/{published.slug}/')
+        self.assertNotIn('preview_token', response.data)
+
+    def test_rotating_the_token_invalidates_the_old_link(self):
+        old_token = str(self.draft.preview_token)
+        self.client.force_authenticate(self.author)
+
+        rotated = self.client.post(f'/api/posts/{self.draft.slug}/preview-token/')
+        self.assertEqual(rotated.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(str(rotated.data['preview_token']), old_token)
+
+        self.client.force_authenticate(None)
+        stale = self.client.get(self.url, {'token': old_token})
+        self.assertEqual(stale.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_only_the_author_may_rotate_the_token(self):
+        stranger = make_user('stranger@example.com', 'stranger')
+        self.client.force_authenticate(stranger)
+        response = self.client.post(f'/api/posts/{self.draft.slug}/preview-token/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class EditorImageUploadTests(APITestCase):
+    """Inline images uploaded from the post editor."""
+
+    def setUp(self):
+        self.author = make_user()
+        self.url = '/api/uploads/images/'
+
+    def make_image(self, name='inline.png'):
+        import io
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new('RGB', (40, 40), 'blue').save(buffer, format='PNG')
+        return SimpleUploadedFile(name, buffer.getvalue(), content_type='image/png')
+
+    def test_upload_requires_sign_in(self):
+        response = self.client.post(self.url, {'image': self.make_image()}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_upload_returns_a_usable_url(self):
+        self.client.force_authenticate(self.author)
+        response = self.client.post(self.url, {'image': self.make_image()}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['url'].startswith('http'))
+        self.assertEqual(EditorImage.objects.filter(uploaded_by=self.author).count(), 1)
+
+    def test_a_non_image_is_rejected(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.force_authenticate(self.author)
+        bad = SimpleUploadedFile('notes.txt', b'not an image', content_type='text/plain')
+        response = self.client.post(self.url, {'image': bad}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_the_list_shows_only_my_uploads(self):
+        other = make_user('other@example.com', 'other')
+        self.client.force_authenticate(other)
+        self.client.post(self.url, {'image': self.make_image()}, format='multipart')
+
+        self.client.force_authenticate(self.author)
+        response = self.client.get('/api/uploads/images/mine/')
+        self.assertEqual(response.data['count'], 0)
+
+
+class FeedAndSitemapTests(APITestCase):
+    """Syndication and SEO surfaces."""
+
+    def setUp(self):
+        self.author = make_user()
+        self.published = make_post(self.author, title='Indexed post')
+        make_post(self.author, title='Hidden draft', status=Post.Status.DRAFT)
+
+    def test_rss_feed_lists_published_posts(self):
+        response = self.client.get('/feed/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.content.decode()
+        self.assertIn('Indexed post', body)
+        self.assertNotIn('Hidden draft', body)
+
+    def test_atom_feed_is_served(self):
+        response = self.client.get('/feed/atom/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_feed_links_point_at_the_frontend_not_the_api(self):
+        from django.conf import settings
+
+        body = self.client.get('/feed/').content.decode()
+        self.assertIn(f'{settings.FRONTEND_URL.rstrip("/")}/post/{self.published.slug}', body)
+
+    def test_author_feed_is_served(self):
+        response = self.client.get(f'/feed/author/{self.author.username}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('Indexed post', response.content.decode())
+
+    def test_sitemap_lists_published_posts_only(self):
+        response = self.client.get('/sitemap.xml')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.content.decode()
+        self.assertIn(f'/post/{self.published.slug}', body)
+        self.assertNotIn('hidden-draft', body)
+
+    def test_robots_points_crawlers_at_the_sitemap(self):
+        response = self.client.get('/robots.txt')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.content.decode()
+        self.assertIn('Disallow: /api/', body)
+        self.assertIn('sitemap.xml', body)

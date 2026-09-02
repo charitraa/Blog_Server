@@ -5,7 +5,7 @@ from rest_framework import serializers
 from apps.user.serializers import AuthorSerializer, absolute_url
 from blog_server.validators import validate_image_upload
 
-from .models import Category, Like, Post, Tag
+from .models import Bookmark, Category, EditorImage, Like, Post, Tag
 from .utils import build_excerpt, plain_text, sanitize_html
 
 
@@ -97,6 +97,7 @@ class PostListSerializer(serializers.ModelSerializer):
     like_count = serializers.IntegerField(read_only=True)
     comment_count = serializers.IntegerField(read_only=True)
     is_liked = serializers.SerializerMethodField()
+    is_bookmarked = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -104,7 +105,8 @@ class PostListSerializer(serializers.ModelSerializer):
             'id', 'title', 'slug', 'excerpt', 'cover_image',
             'author', 'category', 'tags', 'status',
             'published_at', 'created_at', 'updated_at',
-            'reading_time', 'like_count', 'comment_count', 'view_count', 'is_liked',
+            'reading_time', 'like_count', 'comment_count', 'view_count',
+            'is_liked', 'is_bookmarked',
         ]
         read_only_fields = fields
 
@@ -123,12 +125,37 @@ class PostListSerializer(serializers.ModelSerializer):
             return False
         return Like.objects.filter(post=obj, user=request.user).exists()
 
+    @extend_schema_field(serializers.BooleanField())
+    def get_is_bookmarked(self, obj):
+        annotated = getattr(obj, 'is_bookmarked', None)
+        if annotated is not None:
+            return bool(annotated)
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return Bookmark.objects.filter(post=obj, user=request.user).exists()
+
 
 class PostDetailSerializer(PostListSerializer):
     """List fields plus the sanitized article body."""
 
     class Meta(PostListSerializer.Meta):
         fields = PostListSerializer.Meta.fields + ['content']
+        read_only_fields = fields
+
+
+class PostAuthorDetailSerializer(PostDetailSerializer):
+    """
+    What the author sees on their own post.
+
+    Adds the draft preview link, which must never appear in a public response —
+    anyone holding it can read an unpublished draft.
+    """
+
+    preview_token = serializers.UUIDField(read_only=True)
+
+    class Meta(PostDetailSerializer.Meta):
+        fields = PostDetailSerializer.Meta.fields + ['preview_token']
         read_only_fields = fields
 
 
@@ -214,3 +241,42 @@ class LikeStateSerializer(serializers.Serializer):
 
     is_liked = serializers.BooleanField()
     like_count = serializers.IntegerField()
+
+
+class BookmarkStateSerializer(serializers.Serializer):
+    """Response of the bookmark/unbookmark endpoints."""
+
+    is_bookmarked = serializers.BooleanField()
+
+
+class EditorImageSerializer(serializers.ModelSerializer):
+    """
+    An inline image uploaded from the post editor.
+
+    The response carries the absolute `url` the editor drops straight into the
+    article body.
+    """
+
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EditorImage
+        fields = ['id', 'image', 'url', 'created_at']
+        read_only_fields = ['id', 'url', 'created_at']
+        extra_kwargs = {'image': {'write_only': True}}
+
+    def validate_image(self, value):
+        try:
+            validate_image_upload(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        return value
+
+    @extend_schema_field(serializers.URLField())
+    def get_url(self, obj):
+        return absolute_url(self.context.get('request'), obj.image)
+
+    def create(self, validated_data):
+        return EditorImage.objects.create(
+            uploaded_by=self.context['request'].user, **validated_data
+        )

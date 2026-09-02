@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.translation import gettext_lazy as _
 
-from .models import Follow, LoginCode, User
+from .models import Follow, LoginCode, PasswordResetToken, User
 
 
 @admin.register(User)
@@ -57,6 +57,19 @@ class LoginCodeAdmin(admin.ModelAdmin):
     # The code itself is a credential; it is not browsable in the admin.
     exclude = ('code',)
     readonly_fields = ('user', 'created_at', 'expires_at')
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(PasswordResetToken)
+class PasswordResetTokenAdmin(admin.ModelAdmin):
+    """Read-only: the plain token is never stored, so nothing here can be reused."""
+
+    list_display = ['user', 'created_at', 'expires_at', 'used_at']
+    list_filter = ['created_at']
+    search_fields = ['user__email', 'user__username']
+    readonly_fields = ['id', 'user', 'token_hash', 'created_at', 'expires_at', 'used_at']
 
     def has_add_permission(self, request):
         return False

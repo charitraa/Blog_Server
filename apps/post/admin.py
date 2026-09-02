@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import Category, Like, Post, PostView, Tag
+from .models import Bookmark, Category, EditorImage, Like, Post, PostView, Tag
 
 
 @admin.register(Category)
@@ -103,3 +103,19 @@ class PostViewAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(Bookmark)
+class BookmarkAdmin(admin.ModelAdmin):
+    list_display = ['user', 'post', 'created_at']
+    search_fields = ['user__username', 'user__email', 'post__title']
+    raw_id_fields = ['user', 'post']
+    readonly_fields = ['id', 'created_at']
+
+
+@admin.register(EditorImage)
+class EditorImageAdmin(admin.ModelAdmin):
+    list_display = ['image', 'uploaded_by', 'created_at']
+    search_fields = ['uploaded_by__username', 'uploaded_by__email']
+    raw_id_fields = ['uploaded_by']
+    readonly_fields = ['id', 'created_at']

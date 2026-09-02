@@ -14,10 +14,13 @@ from blog_server.pagination import StandardPagination
 from blog_server.permission import IsAuthorOrReadOnly
 
 from .filters import PostFilter
-from .models import Category, Like, Post, PostView, Tag
+from .models import Bookmark, Category, EditorImage, Like, Post, PostView, Tag
 from .serializers import (
+    BookmarkStateSerializer,
     CategorySerializer,
+    EditorImageSerializer,
     LikeStateSerializer,
+    PostAuthorDetailSerializer,
     PostDetailSerializer,
     PostListSerializer,
     PostWriteSerializer,
@@ -50,7 +53,11 @@ def annotated_posts(request):
 
     if request.user.is_authenticated:
         liked = Like.objects.filter(post=OuterRef('pk'), user=request.user)
-        queryset = queryset.annotate(is_liked=Exists(liked))
+        bookmarked = Bookmark.objects.filter(post=OuterRef('pk'), user=request.user)
+        queryset = queryset.annotate(
+            is_liked=Exists(liked),
+            is_bookmarked=Exists(bookmarked),
+        )
     return queryset
 
 
@@ -111,6 +118,13 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
             return PostWriteSerializer
         return PostDetailSerializer
 
+    def author_aware_serializer(self, post):
+        """Only the post's own author (or staff) is shown the preview token."""
+        user = self.request.user
+        if user.is_authenticated and (post.author_id == user.id or user.is_staff):
+            return PostAuthorDetailSerializer(post, context=self.get_serializer_context())
+        return PostDetailSerializer(post, context=self.get_serializer_context())
+
     def get_queryset(self):
         return annotated_posts(self.request)
 
@@ -130,7 +144,7 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
     def retrieve(self, request, *args, **kwargs):
         post = self.get_object()
         self.record_view(request, post)
-        return Response(self.get_serializer(post).data)
+        return Response(self.author_aware_serializer(post).data)
 
     def record_view(self, request, post):
         """
@@ -381,3 +395,145 @@ class LegacyAuthorPostCountView(APIView):
     def get(self, request, user_id):
         count = Post.objects.visible_to(request.user).filter(author_id=user_id).count()
         return Response({'post_count': count})
+
+
+# ---------------------------------------------------------------------------
+# Bookmarks, uploads and draft previews
+# ---------------------------------------------------------------------------
+
+class PostBookmarkView(APIView):
+    """
+    POST   /api/posts/<slug>/bookmark/   save for later
+    DELETE /api/posts/<slug>/bookmark/   remove from the reading list
+
+    Idempotent in both directions: the unique constraint on (post, user) means
+    a double-tap cannot create two rows, and removing something that was never
+    saved is a no-op rather than a 404.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = BookmarkStateSerializer
+
+    def get_post(self, slug):
+        return get_object_or_404(Post.objects.visible_to(self.request.user), slug=slug)
+
+    @extend_schema(request=None, responses={200: BookmarkStateSerializer})
+    def post(self, request, slug):
+        post = self.get_post(slug)
+        Bookmark.objects.get_or_create(post=post, user=request.user)
+        return Response({'is_bookmarked': True})
+
+    @extend_schema(request=None, responses={200: BookmarkStateSerializer})
+    def delete(self, request, slug):
+        post = self.get_post(slug)
+        Bookmark.objects.filter(post=post, user=request.user).delete()
+        return Response({'is_bookmarked': False})
+
+
+class BookmarkListView(generics.ListAPIView):
+    """
+    GET /api/bookmarks/ — the signed-in reader's saved posts.
+
+    Ordered by when they were saved, not when the post was published, because
+    that is the order the reader built the list in.
+    """
+
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filterset_class = PostFilter
+    search_fields = ['title', 'excerpt', 'author__username']
+
+    def get_queryset(self):
+        return (
+            annotated_posts(self.request)
+            .filter(bookmarks__user=self.request.user)
+            .order_by('-bookmarks__created_at')
+        )
+
+
+class EditorImageUploadView(generics.CreateAPIView):
+    """
+    POST /api/uploads/images/ — multipart upload for images used inside a post
+    body.
+
+    Answers with the absolute URL the editor inserts into the article. Rate
+    limited under the `write` scope so an account cannot be used to fill the
+    disk.
+    """
+
+    serializer_class = EditorImageSerializer
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'write'
+    queryset = EditorImage.objects.none()  # for schema generation only
+
+
+class MyEditorImageListView(generics.ListAPIView):
+    """GET /api/uploads/images/mine/ — images this author has uploaded."""
+
+    serializer_class = EditorImageSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+
+    def get_queryset(self):
+        return EditorImage.objects.filter(uploaded_by=self.request.user)
+
+
+class PostPreviewView(APIView):
+    """
+    GET /api/posts/<slug>/preview/?token=<uuid>
+
+    Reads an unpublished draft without signing in, for sharing with an editor
+    or reviewer. The token is the entire authorisation, so it is compared in
+    full and a wrong one is indistinguishable from a missing post.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = PostDetailSerializer
+
+    @extend_schema(
+        parameters=[OpenApiParameter('token', str, required=True,
+                                     description='The post\'s preview_token.')],
+        responses={200: PostDetailSerializer},
+    )
+    def get(self, request, slug):
+        token = request.query_params.get('token', '')
+        if not token:
+            return Response(
+                {'detail': 'A preview token is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Deliberately not `visible_to`: a valid token is what grants access.
+        post = Post.objects.with_related().with_counts().filter(slug=slug).first()
+        if post is None or str(post.preview_token) != str(token):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # A preview is not a real readership signal, so it is not counted.
+        return Response(PostDetailSerializer(post, context={'request': request}).data)
+
+
+class PostPreviewTokenView(APIView):
+    """
+    POST /api/posts/<slug>/preview-token/ — rotate the draft's preview token,
+    which revokes every share link handed out so far.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostAuthorDetailSerializer
+
+    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    def post(self, request, slug):
+        import uuid as uuid_module
+
+        post = get_object_or_404(Post, slug=slug)
+        if post.author_id != request.user.id and not request.user.is_staff:
+            return Response(
+                {'detail': 'You do not have permission to perform this action.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        post.preview_token = uuid_module.uuid4()
+        post.save(update_fields=['preview_token'])
+        return Response(PostAuthorDetailSerializer(post, context={'request': request}).data)

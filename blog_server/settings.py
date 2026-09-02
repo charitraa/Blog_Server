@@ -8,6 +8,7 @@ Nothing secret is hard-coded here.
 from datetime import timedelta
 from pathlib import Path
 import os
+import sys
 from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -46,6 +47,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.sitemaps',
     'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
     'django_filters',
@@ -54,6 +56,8 @@ INSTALLED_APPS = [
     'apps.user',
     'apps.post',
     'apps.comment',
+    'apps.newsletter',
+    'apps.notification',
 ]
 
 MIDDLEWARE = [
@@ -259,8 +263,11 @@ REFRESH_COOKIE_NAME = 'refresh_token'
 # Email
 # ---------------------------------------------------------------------------
 
-EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='').strip()
+# Google displays an app password as four groups of four ("abcd efgh ijkl mnop"),
+# but SMTP will not accept those spaces. Stripping them here means a password
+# pasted straight from the Google page works instead of failing as bad credentials.
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='').replace(' ', '').strip()
 
 # Without SMTP credentials, print emails to the console instead of failing.
 if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
@@ -271,7 +278,14 @@ else:
 EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
 EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
-DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'no-reply@mindfulblog.local')
+# Gmail (and most providers) refuse to send as an address the authenticated
+# account does not own, so a made-up From silently breaks every email. Fall back
+# to the account itself, and ignore a configured value that cannot work.
+_configured_from = config('DEFAULT_FROM_EMAIL', default='').strip()
+if EMAIL_HOST_USER and _configured_from.endswith(('.local', '.invalid', '.example')):
+    DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+else:
+    DEFAULT_FROM_EMAIL = _configured_from or EMAIL_HOST_USER or 'no-reply@mindfulblog.local'
 
 SITE_NAME = config('SITE_NAME', default='Mindful Blog')
 
@@ -328,6 +342,49 @@ if not DEBUG:
 
 GITHUB_CLIENT_ID = config('GITHUB_CLIENT_ID', default='')
 GITHUB_SECRET = config('GITHUB_SECRET', default='')
+
+GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID', default='')
+GOOGLE_SECRET = config('GOOGLE_SECRET', default='')
+# Google validates the redirect_uri against the one registered for the client,
+# so the default has to match whatever the SPA actually sends.
+GOOGLE_REDIRECT_URI = config(
+    'GOOGLE_REDIRECT_URI',
+    default=f'{FRONTEND_URL.rstrip("/")}/auth/callback/google',
+)
+
+# How long an emailed password-reset link stays usable.
+PASSWORD_RESET_TTL_MINUTES = config('PASSWORD_RESET_TTL_MINUTES', default=30, cast=int)
+
+
+# ---------------------------------------------------------------------------
+# Cache
+# ---------------------------------------------------------------------------
+
+# Throttle counters live here. The in-memory default is per-process, so a
+# multi-worker deployment should point REDIS_URL at a shared cache — otherwise
+# each worker enforces its own separate budget.
+REDIS_URL = config('REDIS_URL', default='')
+
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'blog-server',
+        }
+    }
+
+# Under the test runner every request comes from the same address, so a shared
+# throttle counter would leak between unrelated tests and fail them at random.
+# Throttling itself is covered by its own tests, which install a real cache.
+if 'test' in sys.argv:
+    CACHES = {'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}}
 
 
 # ---------------------------------------------------------------------------

@@ -12,4 +12,13 @@ urlpatterns = [
     path('verify/', views.VerifyEmailView.as_view(), name='auth-verify'),
     path('resend-code/', views.ResendCodeView.as_view(), name='auth-resend-code'),
     path('me/', views.MeView.as_view(), name='auth-me'),
+
+    # Forgotten passwords
+    path('password-reset/', views.PasswordResetRequestView.as_view(), name='auth-password-reset'),
+    path('password-reset/confirm/', views.PasswordResetConfirmView.as_view(),
+         name='auth-password-reset-confirm'),
+
+    # Social sign-in
+    path('providers/', views.SocialProvidersView.as_view(), name='auth-providers'),
+    path('social/<str:provider>/', views.SocialAuthView.as_view(), name='auth-social'),
 ]

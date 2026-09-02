@@ -1,13 +1,18 @@
 """Authentication, profile and follow tests."""
 
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.post.models import Post
-from apps.user.models import Follow, LoginCode
+from apps.user.models import Follow, LoginCode, PasswordResetToken
+from apps.user.social import SocialProfile
+from apps.user.views import user_from_social
 
 User = get_user_model()
 
@@ -272,3 +277,181 @@ class FollowTests(APITestCase):
         self.client.force_authenticate(self.user)
         response = self.client.post(f'/api/users/{self.user.username}/follow/')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PasswordResetTests(APITestCase):
+    """The forgotten-password flow."""
+
+    def setUp(self):
+        self.user = make_user()
+        self.request_url = '/api/auth/password-reset/'
+        self.confirm_url = '/api/auth/password-reset/confirm/'
+
+    def test_requesting_a_reset_for_an_unknown_address_looks_identical(self):
+        known = self.client.post(self.request_url, {'email': self.user.email}, format='json')
+        unknown = self.client.post(self.request_url, {'email': 'nobody@example.com'}, format='json')
+        self.assertEqual(known.status_code, unknown.status_code)
+        self.assertEqual(known.data['message'], unknown.data['message'])
+
+    def test_no_token_is_issued_for_an_unknown_address(self):
+        self.client.post(self.request_url, {'email': 'nobody@example.com'}, format='json')
+        self.assertEqual(PasswordResetToken.objects.count(), 0)
+
+    def test_the_plain_token_is_never_stored(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        stored = PasswordResetToken.objects.get()
+        self.assertNotEqual(stored.token_hash, raw)
+        self.assertEqual(stored.token_hash, PasswordResetToken.hash_token(raw))
+
+    def test_a_valid_token_sets_a_new_password_and_signs_in(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        response = self.client.post(self.confirm_url, {
+            'token': raw,
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'BrandNewPass!99',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('BrandNewPass!99'))
+
+    def test_a_token_can_only_be_used_once(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        payload = {
+            'token': raw,
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'BrandNewPass!99',
+        }
+        self.client.post(self.confirm_url, payload, format='json')
+        second = self.client.post(self.confirm_url, payload, format='json')
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_expired_token_is_rejected(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        PasswordResetToken.objects.update(expires_at=timezone.now() - timedelta(minutes=1))
+
+        response = self.client.post(self.confirm_url, {
+            'token': raw,
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'BrandNewPass!99',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_unknown_token_is_rejected(self):
+        response = self.client.post(self.confirm_url, {
+            'token': 'not-a-real-token',
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'BrandNewPass!99',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mismatched_passwords_are_rejected(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        response = self.client.post(self.confirm_url, {
+            'token': raw,
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'SomethingElse!99',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_weak_password_is_rejected(self):
+        raw = PasswordResetToken.issue(self.user, 30)
+        response = self.client.post(self.confirm_url, {
+            'token': raw,
+            'new_password': '12345678',
+            'new_password_confirm': '12345678',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('StrongPass!234'))
+
+    def test_issuing_a_new_token_invalidates_the_previous_one(self):
+        first = PasswordResetToken.issue(self.user, 30)
+        PasswordResetToken.issue(self.user, 30)
+
+        response = self.client.post(self.confirm_url, {
+            'token': first,
+            'new_password': 'BrandNewPass!99',
+            'new_password_confirm': 'BrandNewPass!99',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# Social credentials are read from the environment, so these tests pin them
+# explicitly. Without that, the suite would pass or fail depending on which
+# providers the developer happens to have configured in their own .env.
+NO_SOCIAL = override_settings(
+    GITHUB_CLIENT_ID='', GITHUB_SECRET='',
+    GOOGLE_CLIENT_ID='', GOOGLE_SECRET='',
+)
+
+
+@NO_SOCIAL
+class SocialAuthTests(APITestCase):
+    """Sign-in through GitHub and Google."""
+
+    def test_providers_list_is_empty_without_credentials(self):
+        response = self.client.get('/api/auth/providers/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    @override_settings(
+        GITHUB_CLIENT_ID='id', GITHUB_SECRET='secret',
+        GOOGLE_CLIENT_ID='', GOOGLE_SECRET='',
+    )
+    def test_a_configured_provider_is_advertised(self):
+        response = self.client.get('/api/auth/providers/')
+        names = [entry['name'] for entry in response.data]
+        self.assertIn('github', names)
+        self.assertNotIn('google', names)
+
+    def test_an_unknown_provider_is_a_400(self):
+        response = self.client.post('/api/auth/social/myspace/', {'code': 'x'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_unconfigured_provider_says_so_rather_than_failing_oddly(self):
+        response = self.client.post('/api/auth/social/github/', {'code': 'x'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn('not configured', response.data['detail'].lower())
+
+    def test_a_missing_code_is_rejected(self):
+        response = self.client.post('/api/auth/social/github/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_social_profile_creates_a_verified_account(self):
+        profile = SocialProfile('newcomer@example.com', 'Grace', 'Hopper', 'grace', 'github')
+        user, created = user_from_social(profile)
+
+        self.assertTrue(created)
+        self.assertTrue(user.is_verified)
+        self.assertEqual(user.auth_provider, 'github')
+        self.assertFalse(user.has_usable_password())
+
+    def test_a_social_profile_matches_an_existing_account_by_email(self):
+        profile = SocialProfile(self.existing.email, 'Ada', 'Lovelace', 'ada', 'google')
+        user, created = user_from_social(profile)
+
+        self.assertFalse(created)
+        self.assertEqual(user.pk, self.existing.pk)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_signing_in_socially_verifies_a_pending_account(self):
+        self.existing.is_verified = False
+        self.existing.save(update_fields=['is_verified'])
+
+        user, _ = user_from_social(
+            SocialProfile(self.existing.email, '', '', 'ada', 'github')
+        )
+        self.assertTrue(user.is_verified)
+
+    def test_a_taken_username_does_not_break_account_creation(self):
+        make_user('taken@example.com', 'grace')
+        user, created = user_from_social(
+            SocialProfile('newcomer@example.com', 'Grace', 'Hopper', 'grace', 'github')
+        )
+        self.assertTrue(created)
+        self.assertNotEqual(user.username, 'grace')
+
+    def setUp(self):
+        self.existing = make_user()

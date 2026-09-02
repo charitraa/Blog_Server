@@ -275,3 +275,46 @@ class DashboardSerializer(serializers.Serializer):
     total_comments = serializers.IntegerField()
     follower_count = serializers.IntegerField()
     following_count = serializers.IntegerField()
+
+
+class SocialAuthSerializer(serializers.Serializer):
+    """
+    Body of `POST /api/auth/social/<provider>/`.
+
+    The frontend never sees a token: it forwards the short-lived `code` the
+    provider handed it, and the server does the exchange with the client secret.
+    """
+
+    code = serializers.CharField(required=True, trim_whitespace=True)
+    # Providers verify this against the one registered for the app, so it has to
+    # match whatever the frontend sent when it started the flow.
+    redirect_uri = serializers.CharField(required=False, allow_blank=True)
+
+
+class SocialProviderSerializer(serializers.Serializer):
+    """One entry of `GET /api/auth/providers/`."""
+
+    name = serializers.CharField()
+    authorize_url = serializers.CharField()
+    client_id = serializers.CharField()
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    token = serializers.CharField(required=True, max_length=128)
+    new_password = serializers.CharField(write_only=True, required=True)
+    new_password_confirm = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['new_password_confirm']:
+            raise serializers.ValidationError({'new_password_confirm': 'New passwords do not match.'})
+        # The strength rules are the same ones registration enforces. The user
+        # they are checked against is attached by the view once the token
+        # resolves, so a reset cannot use a password that is just the email.
+        return attrs

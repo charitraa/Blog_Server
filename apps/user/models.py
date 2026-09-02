@@ -176,3 +176,57 @@ class LoginCode(models.Model):
     @property
     def is_usable(self):
         return not self.is_used and not self.is_expired()
+
+
+class PasswordResetToken(models.Model):
+    """
+    A single-use token emailed to someone who has forgotten their password.
+
+    Only the SHA-256 of the token is stored, so a leaked database dump cannot be
+    used to reset anybody's password — the plain token exists only in the email.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_reset_tokens')
+    token_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'used_at']),
+        ]
+
+    def __str__(self):
+        return f'password reset for {self.user.email}'
+
+    @staticmethod
+    def hash_token(raw_token):
+        import hashlib
+        return hashlib.sha256(raw_token.encode()).hexdigest()
+
+    @classmethod
+    def issue(cls, user, ttl_minutes):
+        """Invalidate any outstanding tokens and return a fresh plain one."""
+        import secrets
+        from datetime import timedelta
+
+        cls.objects.filter(user=user, used_at__isnull=True).update(used_at=timezone.now())
+
+        raw_token = secrets.token_urlsafe(32)
+        cls.objects.create(
+            user=user,
+            token_hash=cls.hash_token(raw_token),
+            expires_at=timezone.now() + timedelta(minutes=ttl_minutes),
+        )
+        return raw_token
+
+    @property
+    def is_usable(self):
+        return self.used_at is None and timezone.now() <= self.expires_at
+
+    def consume(self):
+        self.used_at = timezone.now()
+        self.save(update_fields=['used_at'])

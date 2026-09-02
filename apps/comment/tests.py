@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.comment.models import Comment
+from apps.comment.models import Comment, CommentReport
 from apps.post.models import Post
 
 User = get_user_model()
@@ -179,3 +179,83 @@ class CommentTests(APITestCase):
         self.client.force_authenticate(self.reader)
         response = self.client.get(f'/api/posts/{draft.slug}/comments/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class CommentModerationTests(APITestCase):
+    """Reporting a comment, and what a moderator's decision does to a thread."""
+
+    def setUp(self):
+        self.author = make_user()
+        self.reader = make_user('reader@example.com', 'reader')
+        self.post = Post.objects.create(
+            title='A post to discuss', content=BODY, author=self.author,
+            status=Post.Status.PUBLISHED,
+        )
+        self.comment = Comment.objects.create(
+            post=self.post, author=self.reader, content='Buy cheap watches',
+        )
+        self.url = f'/api/comments/{self.comment.id}/report/'
+
+    def test_reporting_requires_sign_in(self):
+        response = self.client.post(self.url, {'reason': 'spam'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_a_reader_can_report_a_comment(self):
+        self.client.force_authenticate(self.author)
+        response = self.client.post(
+            self.url, {'reason': 'spam', 'detail': 'Advertising'}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(CommentReport.objects.count(), 1)
+
+    def test_you_cannot_report_your_own_comment(self):
+        self.client.force_authenticate(self.reader)
+        response = self.client.post(self.url, {'reason': 'spam'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reporting_twice_updates_rather_than_duplicates(self):
+        self.client.force_authenticate(self.author)
+        self.client.post(self.url, {'reason': 'spam'}, format='json')
+        second = self.client.post(self.url, {'reason': 'abuse'}, format='json')
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(CommentReport.objects.count(), 1)
+        self.assertEqual(CommentReport.objects.get().reason, 'abuse')
+
+    def test_a_report_does_not_hide_the_comment_by_itself(self):
+        self.client.force_authenticate(self.author)
+        self.client.post(self.url, {'reason': 'spam'}, format='json')
+
+        self.comment.refresh_from_db()
+        self.assertFalse(self.comment.is_hidden)
+
+        response = self.client.get(f'/api/posts/{self.post.slug}/comments/')
+        self.assertEqual(response.data['count'], 1)
+
+    def test_a_hidden_comment_leaves_the_public_thread(self):
+        self.comment.is_hidden = True
+        self.comment.save(update_fields=['is_hidden'])
+
+        response = self.client.get(f'/api/posts/{self.post.slug}/comments/')
+        self.assertEqual(response.data['count'], 0)
+
+    def test_a_hidden_reply_leaves_its_parents_reply_list(self):
+        reply = Comment.objects.create(
+            post=self.post, author=self.author, parent=self.comment, content='Reported this',
+        )
+        reply.is_hidden = True
+        reply.save(update_fields=['is_hidden'])
+
+        thread = self.client.get(f'/api/posts/{self.post.slug}/comments/').data['results'][0]
+        self.assertEqual(thread['replies'], [])
+        self.assertEqual(thread['reply_count'], 0)
+
+    def test_hiding_a_comment_keeps_it_in_the_database_for_review(self):
+        self.comment.is_hidden = True
+        self.comment.save(update_fields=['is_hidden'])
+        self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())
+
+    def test_an_invalid_reason_is_rejected(self):
+        self.client.force_authenticate(self.author)
+        response = self.client.post(self.url, {'reason': 'because'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

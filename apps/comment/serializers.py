@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from apps.user.serializers import AuthorSerializer
 
-from .models import Comment
+from .models import Comment, CommentReport
 
 
 class CommentSerializer(serializers.ModelSerializer):
@@ -23,7 +23,7 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         fields = [
             'id', 'post', 'parent', 'author', 'content',
-            'is_edited', 'created_at', 'updated_at',
+            'is_edited', 'is_hidden', 'created_at', 'updated_at',
             'replies', 'reply_count', 'can_edit',
         ]
         read_only_fields = fields
@@ -33,14 +33,18 @@ class CommentSerializer(serializers.ModelSerializer):
         if obj.parent_id is not None:
             return []
         # `replies` is prefetched by the view, so this does not hit the database.
-        replies = sorted(obj.replies.all(), key=lambda reply: reply.created_at)
+        # Filtering in Python rather than the query keeps that prefetch intact.
+        replies = sorted(
+            (reply for reply in obj.replies.all() if not reply.is_hidden),
+            key=lambda reply: reply.created_at,
+        )
         return CommentSerializer(replies, many=True, context=self.context).data
 
     @extend_schema_field(serializers.IntegerField())
     def get_reply_count(self, obj):
         if obj.parent_id is not None:
             return 0
-        return len(obj.replies.all())
+        return sum(1 for reply in obj.replies.all() if not reply.is_hidden)
 
     @extend_schema_field(serializers.BooleanField())
     def get_can_edit(self, obj):
@@ -77,3 +81,20 @@ class CommentWriteSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         return CommentSerializer(instance, context=self.context).data
+
+
+class CommentReportSerializer(serializers.ModelSerializer):
+    """
+    Body of `POST /api/comments/<id>/report/`.
+
+    `comment`, `reporter` and `status` are set by the view — a reporter cannot
+    file a report as somebody else or mark their own report reviewed.
+    """
+
+    class Meta:
+        model = CommentReport
+        fields = ['id', 'reason', 'detail', 'status', 'created_at']
+        read_only_fields = ['id', 'status', 'created_at']
+
+    def validate_detail(self, value):
+        return (value or '').strip()[:500]

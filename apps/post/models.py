@@ -123,6 +123,10 @@ class Post(models.Model):
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
 
+    # Unguessable key that lets an author share a draft for review without
+    # publishing it. Rotating it revokes every link handed out so far.
+    preview_token = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+
     # Denormalised so trending queries do not have to count rows on every read.
     view_count = models.PositiveIntegerField(default=0)
     # Minutes, derived from `content` on every save.
@@ -170,7 +174,11 @@ class Post(models.Model):
         super().save(*args, **kwargs)
 
     def get_absolute_url(self):
-        return f'/blog/{self.slug}'
+        return f'/post/{self.slug}'
+
+    def preview_url(self):
+        """Shareable link to an unpublished draft."""
+        return f'/post/{self.slug}?preview={self.preview_token}'
 
 
 class Like(models.Model):

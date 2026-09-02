@@ -28,6 +28,16 @@ React frontend.
 - 📊 Dashboard statistics computed from real data
 - 👁️ Privacy-preserving view counting (salted, hashed fingerprints — no raw IPs)
 - 🛡️ Object-level permissions, scoped rate limiting, strict CORS and HTML sanitisation
+- 🔖 Bookmarks — a per-reader saved-for-later reading list
+- 🔔 Notifications for likes, comments, replies and new followers, raised by
+  signals so every path that creates one produces a notification
+- 🔑 Social sign-in with GitHub and Google (matched on a **verified** email only)
+- 🔓 Forgotten-password reset by emailed single-use link (only the hash is stored)
+- 🖼️ Image uploads from inside the post editor, owned and rate limited per author
+- 👁️‍🗨️ Shareable draft preview links, revocable by rotating the token
+- 🚩 Comment reporting with an admin moderation queue (`is_hidden`)
+- 📬 Newsletter with double opt-in and one-click unsubscribe
+- 🌐 RSS + Atom feeds, `sitemap.xml` and `robots.txt`, all pointing at the frontend
 - 📖 Generated OpenAPI schema that matches the implementation
 
 ## 📂 Folder Structure
@@ -40,10 +50,12 @@ Blog_Server/
 │   ├── pagination.py       # Shared pagination classes
 │   ├── validators.py       # Image upload validation
 │   ├── exceptions.py       # Consistent API error format
+│   ├── sitemaps.py         # Sitemaps describing the frontend's URLs
 │   └── api_logging.py      # Request logging with credential redaction
 ├── apps/
 │   ├── user/               # Accounts, auth, profiles, follows
 │   │   ├── authentication.py   # Bearer-or-cookie JWT
+│   │   ├── social.py           # GitHub / Google OAuth providers
 │   │   ├── backends.py         # Email-or-username sign-in
 │   │   ├── auth_urls.py        # /api/auth/
 │   │   ├── urls.py             # /api/users/
@@ -51,8 +63,11 @@ Blog_Server/
 │   ├── post/               # Posts, categories, tags, likes, views
 │   │   ├── utils.py            # Sanitisation, slugs, reading time
 │   │   ├── filters.py          # Explicit, allowlisted query filters
+│   │   ├── feeds.py            # RSS and Atom syndication
 │   │   └── management/commands/seed_categories.py
-│   └── comment/            # Comments and replies
+│   ├── comment/            # Comments, replies and moderation reports
+│   ├── notification/       # Signal-driven notification inbox
+│   └── newsletter/         # Double opt-in mailing list
 ├── media/                  # User uploads
 ├── .env.example            # Copy to .env
 ├── manage.py
@@ -150,6 +165,23 @@ the access token in memory and store nothing.
 | `GET`/`POST` | `/api/posts/{slug}/comments/` | Read or add comments |
 | `PATCH`/`DELETE` | `/api/comments/{id}/` | Edit or delete your own comment |
 | `GET` | `/api/categories/`, `/api/tags/` | Taxonomy |
+| `POST`/`DELETE` | `/api/posts/{slug}/bookmark/` | Save or unsave a post |
+| `GET` | `/api/bookmarks/` | Your reading list |
+| `POST` | `/api/uploads/images/` | Upload an inline editor image (multipart, field `image`) |
+| `GET` | `/api/posts/{slug}/preview/?token=` | Read a draft with its share token, no account needed |
+| `POST` | `/api/posts/{slug}/preview-token/` | Rotate the token, revoking every shared link |
+| `POST` | `/api/comments/{id}/report/` | Flag a comment for a moderator |
+| `GET` | `/api/notifications/` | Your inbox (`?unread=true` to filter) |
+| `GET` | `/api/notifications/unread-count/` | The number on the bell |
+| `POST` | `/api/notifications/read/` | Mark some (`ids`) or all as read |
+| `POST` | `/api/auth/password-reset/` | Email a reset link |
+| `POST` | `/api/auth/password-reset/confirm/` | Set a new password and sign in |
+| `GET` | `/api/auth/providers/` | Social providers this deployment has credentials for |
+| `POST` | `/api/auth/social/{provider}/` | Exchange an OAuth code for a session |
+| `POST` | `/api/newsletter/subscribe/` | Start double opt-in |
+| `POST` | `/api/newsletter/confirm/`, `/unsubscribe/` | Complete or cancel a subscription |
+| `GET` | `/feed/`, `/feed/atom/` | Syndication (also `/feed/category/{slug}/`, `/feed/author/{username}/`) |
+| `GET` | `/sitemap.xml`, `/robots.txt` | SEO surfaces, describing the frontend |
 
 The original `/user/`, `/post/` and `/comment/` routes are still mounted as aliases onto
 these same views, so existing clients keep working.
