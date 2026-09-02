@@ -16,6 +16,8 @@ urlpatterns = [
     # ---- Current API ----------------------------------------------------
     path('api/auth/', include('apps.user.auth_urls')),
     path('api/users/', include('apps.user.urls')),
+    path('api/admin/', include('apps.user.admin_urls')),
+    path('api/topics/', include('apps.user.topic_urls')),
     path('api/', include('apps.post.urls')),
     path('api/', include('apps.comment.urls')),
     path('api/', include('apps.notification.urls')),

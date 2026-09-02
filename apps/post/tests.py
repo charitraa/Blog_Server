@@ -257,12 +257,46 @@ class PostWriteTests(APITestCase):
         self.client.force_authenticate(self.author)
         response = self.client.delete(f'/api/posts/{post.slug}/')
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(Post.objects.filter(pk=post.pk).exists())
+        # Deleting is reversible: the row moves to the author's trash so its
+        # comments and likes survive and a misclick can be undone.
+        post.refresh_from_db()
+        self.assertTrue(post.is_deleted)
 
-    def test_staff_may_moderate_another_users_post(self):
+    def test_a_deleted_post_disappears_from_public_lists(self):
+        post = make_post(self.author)
+        self.client.force_authenticate(self.author)
+        self.client.delete(f'/api/posts/{post.slug}/')
+
+        self.client.force_authenticate(None)
+        listed = self.client.get('/api/posts/')
+        self.assertNotIn(post.slug, [row['slug'] for row in listed.data['results']])
+
+    def test_a_deleted_post_can_be_restored(self):
+        post = make_post(self.author)
+        self.client.force_authenticate(self.author)
+        self.client.delete(f'/api/posts/{post.slug}/')
+
+        restored = self.client.post(f'/api/posts/{post.slug}/restore/')
+        self.assertEqual(restored.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertFalse(post.is_deleted)
+
+    def test_trash_lists_only_my_deleted_posts(self):
+        mine = make_post(self.author, title='Mine')
+        theirs = make_post(self.other, title='Theirs')
+        mine.soft_delete()
+        theirs.soft_delete()
+
+        self.client.force_authenticate(self.author)
+        response = self.client.get('/api/posts/trash/')
+        self.assertEqual([row['slug'] for row in response.data['results']], [mine.slug])
+
+    def test_an_editor_may_moderate_another_users_post(self):
         post = make_post(self.author)
         staff = make_user('staff@example.com', 'staff')
-        staff.is_staff = True
+        # Authority to touch someone else's content comes from the role, not
+        # from the Django-admin `is_staff` flag.
+        staff.role = 'editor'
         staff.save()
         self.client.force_authenticate(staff)
         response = self.client.delete(f'/api/posts/{post.slug}/')

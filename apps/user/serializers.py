@@ -95,11 +95,22 @@ class UserPublicSerializer(AuthorSerializer):
 
 
 class UserMeSerializer(UserPublicSerializer):
-    """The signed-in user's own record: public fields plus private ones."""
+    """
+    The signed-in user's own record: public fields plus private ones.
+
+    The capability flags are sent so the UI can hide controls the account
+    cannot use. They are a convenience only — every endpoint re-checks.
+    """
+
+    can_publish = serializers.BooleanField(read_only=True)
+    can_edit_others = serializers.BooleanField(read_only=True)
+    can_moderate = serializers.BooleanField(read_only=True)
+    can_manage_users = serializers.BooleanField(read_only=True)
 
     class Meta(UserPublicSerializer.Meta):
         fields = UserPublicSerializer.Meta.fields + [
             'email', 'date_of_birth', 'is_verified', 'is_staff', 'auth_provider',
+            'role', 'can_publish', 'can_edit_others', 'can_moderate', 'can_manage_users',
         ]
         read_only_fields = fields
 
@@ -321,3 +332,28 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         # they are checked against is attached by the view once the token
         # resolves, so a reset cannot use a password that is just the email.
         return attrs
+
+
+class TopicFollowSerializer(serializers.Serializer):
+    """
+    One followed subject.
+
+    Flattened to `kind` + `slug` + `name` rather than exposing the two nullable
+    columns, because a client only ever wants "what am I following".
+    """
+
+    id = serializers.UUIDField(read_only=True)
+    kind = serializers.CharField(read_only=True)
+    slug = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(read_only=True)
+
+    @extend_schema_field(serializers.CharField())
+    def get_slug(self, obj):
+        target = obj.category or obj.tag
+        return target.slug if target else ''
+
+    @extend_schema_field(serializers.CharField())
+    def get_name(self, obj):
+        target = obj.category or obj.tag
+        return target.name if target else ''

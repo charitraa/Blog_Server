@@ -63,17 +63,48 @@ class Tag(models.Model):
 
 
 class PostQuerySet(models.QuerySet):
+    def alive(self):
+        """Everything that has not been soft-deleted."""
+        return self.filter(deleted_at__isnull=True)
+
     def published(self):
-        return self.filter(status=Post.Status.PUBLISHED, published_at__lte=timezone.now())
+        """
+        Live posts.
+
+        A scheduled post whose date has passed counts as published even if the
+        `publish_scheduled` command has not run yet, so a missed cron tick
+        delays tidying up rather than the article itself.
+        """
+        now = timezone.now()
+        return self.alive().filter(
+            models.Q(status=Post.Status.PUBLISHED, published_at__lte=now)
+            | models.Q(status=Post.Status.SCHEDULED, scheduled_for__lte=now)
+        ).exclude(visibility=Post.Visibility.PRIVATE).filter(is_archived=False)
+
+    def readable_by(self, user):
+        """`published()` narrowed to what this particular viewer may open."""
+        queryset = self.published()
+        if user and user.is_authenticated:
+            return queryset
+        # A members-only post is listed but its body is withheld from guests;
+        # that decision lives in the serializer, not here.
+        return queryset
 
     def visible_to(self, user):
-        """Published posts, plus the requesting user's own drafts."""
+        """
+        Published posts, plus the requesting user's own work.
+
+        Anyone who may edit other people's work (editor and above) sees every
+        draft too — reviewing submissions is the whole job, and hiding them
+        would make a contributor's post unreachable rather than merely
+        unpublishable. Soft-deleted posts are excluded for everybody; they are
+        reached through the author's own trash instead.
+        """
         if user and user.is_authenticated:
-            if user.is_staff:
-                return self
-            return self.filter(
-                models.Q(status=Post.Status.PUBLISHED, published_at__lte=timezone.now())
-                | models.Q(author=user)
+            if getattr(user, 'can_edit_others', False) or user.is_staff:
+                return self.alive()
+            return self.alive().filter(
+                models.Q(id__in=self.published().values('id')) | models.Q(author=user)
             )
         return self.published()
 
@@ -91,11 +122,22 @@ class PostQuerySet(models.QuerySet):
 class Post(models.Model):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'
+        # Written by a contributor and waiting for someone who can publish.
+        IN_REVIEW = 'in_review', 'In review'
+        # Dated for the future. Becomes readable on its own once the date
+        # passes, with or without a scheduler running.
+        SCHEDULED = 'scheduled', 'Scheduled'
         PUBLISHED = 'published', 'Published'
+
+    class Visibility(models.TextChoices):
+        PUBLIC = 'public', 'Everyone'
+        MEMBERS = 'members', 'Members only'
+        PRIVATE = 'private', 'Only me'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     title = models.CharField(max_length=200)
+    subtitle = models.CharField(max_length=300, blank=True)
     # Readable URL key. Generated once and then left alone so links stay valid.
     slug = models.SlugField(max_length=240, unique=True, blank=True)
     excerpt = models.CharField(max_length=300, blank=True)
@@ -121,7 +163,29 @@ class Post(models.Model):
     )
     tags = models.ManyToManyField(Tag, blank=True, related_name='posts')
 
-    status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
+    visibility = models.CharField(
+        max_length=10, choices=Visibility.choices, default=Visibility.PUBLIC,
+    )
+
+    # When a scheduled post should go live. The queryset treats a past date as
+    # published, so scheduling works even if no cron job is running.
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+
+    is_featured = models.BooleanField(default=False)
+
+    # Archived posts stay readable by their author but leave every public list.
+    is_archived = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True)
+
+    # Soft delete: the row survives so the author can undo, and so comments and
+    # likes are not destroyed by a misclick. A purge job can remove old ones.
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    # --- SEO overrides. Blank means "derive it from the post". ---
+    seo_title = models.CharField(max_length=70, blank=True)
+    seo_description = models.CharField(max_length=200, blank=True)
+    canonical_url = models.URLField(max_length=300, blank=True)
 
     # Unguessable key that lets an author share a draft for review without
     # publishing it. Rotating it revokes every link handed out so far.
@@ -165,13 +229,90 @@ class Post(models.Model):
         self.reading_time = reading_time_minutes(self.content)
 
         # Stamp the publication date the first time a post goes live, and clear
-        # it again if the author pulls the post back to draft.
+        # it again if the author pulls the post back to a pre-published state.
         if self.status == self.Status.PUBLISHED and self.published_at is None:
             self.published_at = timezone.now()
-        elif self.status == self.Status.DRAFT:
+        elif self.status == self.Status.SCHEDULED:
+            # The scheduled date *is* the publication date, so a post that goes
+            # live on its own already carries the right timestamp.
+            self.published_at = self.scheduled_for
+        elif self.status in (self.Status.DRAFT, self.Status.IN_REVIEW):
             self.published_at = None
 
         super().save(*args, **kwargs)
+
+    # --- Lifecycle transitions ------------------------------------------
+
+    def archive(self):
+        """Take a post out of every public list without deleting it."""
+        self.is_archived = True
+        self.archived_at = timezone.now()
+        self.save(update_fields=['is_archived', 'archived_at'])
+
+    def unarchive(self):
+        self.is_archived = False
+        self.archived_at = None
+        self.save(update_fields=['is_archived', 'archived_at'])
+
+    def soft_delete(self):
+        """
+        Move the post to the author's trash.
+
+        The row stays, so the comments and likes attached to it survive and the
+        author can change their mind.
+        """
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['deleted_at'])
+
+    def restore(self):
+        self.deleted_at = None
+        self.save(update_fields=['deleted_at'])
+
+    @property
+    def is_deleted(self):
+        return self.deleted_at is not None
+
+    @property
+    def is_live(self):
+        """Whether a reader could open this right now."""
+        if self.deleted_at or self.is_archived or self.visibility == self.Visibility.PRIVATE:
+            return False
+        if self.status == self.Status.PUBLISHED:
+            return self.published_at is not None and self.published_at <= timezone.now()
+        if self.status == self.Status.SCHEDULED:
+            return self.scheduled_for is not None and self.scheduled_for <= timezone.now()
+        return False
+
+    def duplicate(self, author=None):
+        """
+        Copy this post into a fresh draft.
+
+        Counters, dates and the share token are deliberately not carried over —
+        the copy is a new piece of work, not a second view of this one.
+        """
+        copy = Post.objects.create(
+            title=f'{self.title} (copy)'[:200],
+            subtitle=self.subtitle,
+            excerpt=self.excerpt,
+            content=self.content,
+            photo=self.photo,
+            author=author or self.author,
+            category=self.category,
+            status=Post.Status.DRAFT,
+            visibility=self.visibility,
+            seo_title=self.seo_title,
+            seo_description=self.seo_description,
+        )
+        copy.tags.set(self.tags.all())
+        return copy
+
+    @property
+    def meta_title(self):
+        return self.seo_title or self.title
+
+    @property
+    def meta_description(self):
+        return self.seo_description or self.excerpt
 
     def get_absolute_url(self):
         return f'/post/{self.slug}'
@@ -282,3 +423,215 @@ class EditorImage(models.Model):
 
     def __str__(self):
         return self.image.name
+
+
+class PostRevision(models.Model):
+    """
+    A snapshot of a post's text at a point in time.
+
+    Stored on every meaningful edit so an author can see what changed and roll
+    back. Only the fields a writer actually edits are kept — counters and
+    timestamps would make every diff noisy without saying anything useful.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='revisions')
+    # Null once the editing account is deleted; the history itself survives.
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='post_revisions',
+    )
+
+    title = models.CharField(max_length=200)
+    subtitle = models.CharField(max_length=300, blank=True)
+    excerpt = models.CharField(max_length=300, blank=True)
+    content = models.TextField()
+    note = models.CharField(max_length=200, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['post', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.post.title} @ {self.created_at:%Y-%m-%d %H:%M}'
+
+    @classmethod
+    def snapshot(cls, post, user=None, note=''):
+        """
+        Record the post's current text, unless it is identical to the newest
+        revision — an autosave that changed nothing should not fill the history.
+        """
+        latest = cls.objects.filter(post=post).first()
+        if latest and (latest.title, latest.subtitle, latest.content) == (
+            post.title, post.subtitle, post.content
+        ):
+            return None
+        return cls.objects.create(
+            post=post,
+            created_by=user,
+            title=post.title,
+            subtitle=post.subtitle,
+            excerpt=post.excerpt,
+            content=post.content,
+            note=note,
+        )
+
+    def restore_onto(self, post, user=None):
+        """Put this revision's text back, after snapshotting what is there now."""
+        PostRevision.snapshot(post, user, note='Before restore')
+        post.title = self.title
+        post.subtitle = self.subtitle
+        post.excerpt = self.excerpt
+        post.content = self.content
+        post.save()
+        return post
+
+
+class Series(models.Model):
+    """
+    An ordered run of posts — "Web Hacking, part 3 of 7".
+
+    Membership lives on `SeriesPost` rather than a plain many-to-many so the
+    order is a real, editable column instead of an accident of insertion.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=160)
+    slug = models.SlugField(max_length=200, unique=True, blank=True)
+    description = models.TextField(max_length=1000, blank=True)
+    cover = models.ImageField(
+        upload_to='series/',
+        validators=[validate_image_upload],
+        blank=True,
+    )
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='series',
+    )
+    is_published = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'series'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['author', '-created_at']),
+            models.Index(fields=['slug']),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = unique_slug(Series, self.title, self)
+        super().save(*args, **kwargs)
+
+    def get_absolute_url(self):
+        return f'/series/{self.slug}'
+
+    @property
+    def post_count(self):
+        return self.entries.count()
+
+    def next_position(self):
+        last = self.entries.order_by('-position').first()
+        return (last.position + 1) if last else 1
+
+
+class SeriesPost(models.Model):
+    """One post's place in a series."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    series = models.ForeignKey(Series, on_delete=models.CASCADE, related_name='entries')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='series_entries')
+    position = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        ordering = ['position']
+        constraints = [
+            # A post appears at most once in a given series, and two posts
+            # cannot claim the same slot.
+            models.UniqueConstraint(fields=['series', 'post'], name='unique_series_post'),
+            models.UniqueConstraint(fields=['series', 'position'], name='unique_series_position'),
+        ]
+        indexes = [
+            models.Index(fields=['series', 'position']),
+        ]
+
+    def __str__(self):
+        return f'{self.series.title} #{self.position}'
+
+
+class SeriesProgress(models.Model):
+    """
+    Which parts of a series a reader has finished.
+
+    One row per (user, post) rather than a counter, so completing part 4 before
+    part 3 is recorded honestly instead of being rounded into "4 of 7 done".
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='series_progress',
+    )
+    series = models.ForeignKey(Series, on_delete=models.CASCADE, related_name='progress')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='series_progress')
+    completed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-completed_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'series', 'post'], name='unique_series_progress',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['user', 'series']),
+        ]
+
+    def __str__(self):
+        return f'{self.user} finished {self.post}'
+
+
+class ReadingHistory(models.Model):
+    """
+    What a reader has opened, and how far they got.
+
+    Distinct from `PostView`, which is an anonymous de-duplication ledger for
+    the public counter. This one belongs to a signed-in reader and powers
+    "continue reading".
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reading_history',
+    )
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='reading_history')
+    # 0-100. Written by the client as the reader scrolls.
+    progress = models.PositiveSmallIntegerField(default=0)
+    is_finished = models.BooleanField(default=False)
+    last_read_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-last_read_at']
+        constraints = [
+            # Re-reading updates the row rather than adding another.
+            models.UniqueConstraint(fields=['user', 'post'], name='unique_reading_history'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-last_read_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.user} read {self.post}'

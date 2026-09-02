@@ -22,7 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.post.models import Like, Post
 from blog_server.pagination import StandardPagination
 
-from .models import Follow, LoginCode, PasswordResetToken
+from .models import Follow, LoginCode, PasswordResetToken, TopicFollow
 from .serializers import (
     DashboardSerializer,
     EmailChangeSerializer,
@@ -33,6 +33,7 @@ from .serializers import (
     RefreshSerializer,
     SocialAuthSerializer,
     SocialProviderSerializer,
+    TopicFollowSerializer,
     UserCreateSerializer,
     UserMeSerializer,
     UserPhotoUpdateSerializer,
@@ -197,6 +198,14 @@ class LoginView(APIView):
         )
         if user is None:
             return Response({'detail': INVALID_CREDENTIALS}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if user.is_currently_suspended:
+            # Said plainly: unlike a bad password, this is not something the
+            # person can fix by trying again.
+            detail = 'This account has been suspended.'
+            if user.suspension_reason:
+                detail = f'{detail} Reason: {user.suspension_reason}'
+            return Response({'detail': detail}, status=status.HTTP_403_FORBIDDEN)
 
         if settings.REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
             send_login_code(user)
@@ -744,3 +753,68 @@ class PasswordResetConfirmView(APIView):
         )
 
         return auth_response(user, request, 'Password updated. You are signed in.')
+
+
+# ---------------------------------------------------------------------------
+# Following topics
+# ---------------------------------------------------------------------------
+
+class TopicFollowView(APIView):
+    """
+    POST   /api/topics/<kind>/<slug>/follow/   follow a category or tag
+    DELETE /api/topics/<kind>/<slug>/follow/   unfollow
+
+    `kind` is "category" or "tag". Following a subject rather than a person is
+    what makes the personalised feed useful to a reader who likes a topic but
+    has no particular writer in mind.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = TopicFollowSerializer
+
+    def resolve(self, kind, slug):
+        from apps.post.models import Category, Tag
+
+        if kind == 'category':
+            return 'category', get_object_or_404(Category, slug=slug)
+        if kind == 'tag':
+            return 'tag', get_object_or_404(Tag, slug=slug)
+        return None, None
+
+    def _count(self, field, target):
+        return TopicFollow.objects.filter(**{field: target}).count()
+
+    @extend_schema(request=None, responses={200: None})
+    def post(self, request, kind, slug):
+        field, target = self.resolve(kind, slug)
+        if target is None:
+            return Response({'detail': f'Unknown topic type "{kind}".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        TopicFollow.objects.get_or_create(user=request.user, **{field: target})
+        return Response({'is_following': True, 'follower_count': self._count(field, target)})
+
+    @extend_schema(request=None, responses={200: None})
+    def delete(self, request, kind, slug):
+        field, target = self.resolve(kind, slug)
+        if target is None:
+            return Response({'detail': f'Unknown topic type "{kind}".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        TopicFollow.objects.filter(user=request.user, **{field: target}).delete()
+        return Response({'is_following': False, 'follower_count': self._count(field, target)})
+
+
+class MyTopicsView(generics.ListAPIView):
+    """GET /api/topics/following/ — the categories and tags this reader follows."""
+
+    serializer_class = TopicFollowSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = TopicFollow.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        return TopicFollow.objects.filter(user=self.request.user).select_related(
+            'category', 'tag'
+        )

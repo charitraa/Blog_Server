@@ -1,7 +1,7 @@
 import logging
 
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Exists, F, OuterRef, Q
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -11,10 +11,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from blog_server.pagination import StandardPagination
-from blog_server.permission import IsAuthorOrReadOnly
+from blog_server.permission import IsAuthorOrEditor
 
 from .filters import PostFilter
-from .models import Bookmark, Category, EditorImage, Like, Post, PostView, Tag
+from .models import (
+    Bookmark, Category, EditorImage, Like, Post, PostRevision, PostView,
+    ReadingHistory, Series, SeriesPost, SeriesProgress, Tag,
+)
 from .serializers import (
     BookmarkStateSerializer,
     CategorySerializer,
@@ -23,9 +26,19 @@ from .serializers import (
     PostAuthorDetailSerializer,
     PostDetailSerializer,
     PostListSerializer,
+    AuthorAnalyticsSerializer,
+    PostAnalyticsSerializer,
+    PostRevisionListSerializer,
+    PostRevisionSerializer,
     PostWriteSerializer,
+    ReadingHistorySerializer,
+    ReadingProgressSerializer,
+    SeriesDetailSerializer,
+    SeriesSerializer,
+    SeriesWriteSerializer,
     TagSerializer,
 )
+from .analytics import author_analytics, post_analytics
 from .utils import viewer_fingerprint
 
 logger = logging.getLogger('apps.post')
@@ -67,7 +80,7 @@ class PostListCreateView(generics.ListCreateAPIView):
     POST /api/posts/   create a post as the signed-in user
     """
 
-    permission_classes = [IsAuthorOrReadOnly]
+    permission_classes = [IsAuthorOrEditor]
     pagination_class = StandardPagination
     filterset_class = PostFilter
     search_fields = ['title', 'excerpt', 'content', 'author__username',
@@ -105,7 +118,7 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
     id-based routes keep resolving.
     """
 
-    permission_classes = [IsAuthorOrReadOnly]
+    permission_classes = [IsAuthorOrEditor]
     lookup_field = 'slug'
 
     def get_throttles(self):
@@ -174,8 +187,20 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
         Post.objects.filter(pk=post.pk).update(view_count=F('view_count') + 1)
         post.view_count += 1
 
+    def perform_update(self, serializer):
+        """Record what the post said before this edit, so it can be rolled back."""
+        PostRevision.snapshot(self.get_object(), self.request.user)
+        serializer.save()
+
     def perform_destroy(self, instance):
-        instance.delete()
+        """
+        Delete is a soft delete.
+
+        The row survives in the author's trash, which keeps the comments and
+        likes attached to it and makes a misclick recoverable. Staff can purge
+        for real from the Django admin.
+        """
+        instance.soft_delete()
 
 
 class PostLikeView(APIView):
@@ -443,6 +468,7 @@ class BookmarkListView(generics.ListAPIView):
     pagination_class = StandardPagination
     filterset_class = PostFilter
     search_fields = ['title', 'excerpt', 'author__username']
+    queryset = Post.objects.none()  # for schema generation only
 
     def get_queryset(self):
         return (
@@ -537,3 +563,563 @@ class PostPreviewTokenView(APIView):
         post.preview_token = uuid_module.uuid4()
         post.save(update_fields=['preview_token'])
         return Response(PostAuthorDetailSerializer(post, context={'request': request}).data)
+
+
+# ---------------------------------------------------------------------------
+# Post lifecycle: archive, trash, duplicate, revisions
+# ---------------------------------------------------------------------------
+
+class PostLifecycleView(APIView):
+    """
+    POST /api/posts/<slug>/<action>/ where action is archive, unarchive,
+    restore or duplicate.
+
+    Grouped into one view because they share the same ownership check and all
+    answer with the post afterwards, so the client can drop the result straight
+    into its cache.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostAuthorDetailSerializer
+
+    ACTIONS = ('archive', 'unarchive', 'restore', 'duplicate')
+
+    def get_post(self, request, slug):
+        # Deliberately not `visible_to`: archived and trashed posts are exactly
+        # the ones these actions operate on.
+        post = get_object_or_404(Post.objects.all(), slug=slug)
+        if post.author_id != request.user.id and not request.user.can_edit_others:
+            return None
+        return post
+
+    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    def post(self, request, slug, action):
+        if action not in self.ACTIONS:
+            return Response({'detail': f'Unknown action "{action}".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        post = self.get_post(request, slug)
+        if post is None:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if action == 'archive':
+            post.archive()
+        elif action == 'unarchive':
+            post.unarchive()
+        elif action == 'restore':
+            post.restore()
+        else:
+            post = post.duplicate(author=request.user)
+
+        return Response(
+            PostAuthorDetailSerializer(post, context={'request': request}).data,
+            status=status.HTTP_201_CREATED if action == 'duplicate' else status.HTTP_200_OK,
+        )
+
+
+class TrashListView(generics.ListAPIView):
+    """GET /api/posts/trash/ — the author's soft-deleted posts."""
+
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = Post.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        return (
+            Post.objects.filter(author=self.request.user, deleted_at__isnull=False)
+            .with_related()
+            .with_counts()
+            .order_by('-deleted_at')
+        )
+
+
+class PostRevisionListView(generics.ListAPIView):
+    """GET /api/posts/<slug>/revisions/ — the edit history, newest first."""
+
+    serializer_class = PostRevisionListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = PostRevision.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        post = get_object_or_404(Post.objects.all(), slug=self.kwargs['slug'])
+        user = self.request.user
+        if post.author_id != user.id and not user.can_edit_others:
+            return PostRevision.objects.none()
+        return PostRevision.objects.filter(post=post).select_related('created_by')
+
+
+class PostRevisionDetailView(APIView):
+    """
+    GET  /api/posts/<slug>/revisions/<id>/          read one revision in full
+    POST /api/posts/<slug>/revisions/<id>/restore/  put its text back
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostRevisionSerializer
+
+    def get_objects(self, request, slug, pk):
+        post = get_object_or_404(Post.objects.all(), slug=slug)
+        if post.author_id != request.user.id and not request.user.can_edit_others:
+            return None, None
+        revision = get_object_or_404(PostRevision, pk=pk, post=post)
+        return post, revision
+
+    @extend_schema(responses={200: PostRevisionSerializer})
+    def get(self, request, slug, pk):
+        post, revision = self.get_objects(request, slug, pk)
+        if post is None:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        return Response(PostRevisionSerializer(revision, context={'request': request}).data)
+
+    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    def post(self, request, slug, pk):
+        post, revision = self.get_objects(request, slug, pk)
+        if post is None:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        revision.restore_onto(post, request.user)
+        return Response(PostAuthorDetailSerializer(post, context={'request': request}).data)
+
+
+# ---------------------------------------------------------------------------
+# Reading history
+# ---------------------------------------------------------------------------
+
+class ReadingProgressView(APIView):
+    """
+    POST /api/posts/<slug>/progress/ — record how far the reader has got.
+
+    Called as someone scrolls, so it updates a single row per (reader, post)
+    rather than appending, and never fails loudly: losing a scroll position is
+    not worth an error in the reader's face.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ReadingProgressSerializer
+
+    @extend_schema(request=ReadingProgressSerializer, responses={200: None})
+    def post(self, request, slug):
+        post = get_object_or_404(Post.objects.visible_to(request.user), slug=slug)
+
+        serializer = ReadingProgressSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        progress = serializer.validated_data['progress']
+        ReadingHistory.objects.update_or_create(
+            user=request.user,
+            post=post,
+            defaults={
+                'progress': progress,
+                # Reaching the end counts as finished even if the client did not say so.
+                'is_finished': serializer.validated_data.get('is_finished') or progress >= 95,
+            },
+        )
+        return Response({'progress': progress})
+
+
+class ReadingHistoryListView(generics.ListAPIView):
+    """GET /api/reading-history/ — what this reader has opened, most recent first."""
+
+    serializer_class = ReadingHistorySerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = ReadingHistory.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        queryset = ReadingHistory.objects.filter(user=self.request.user).select_related(
+            'post', 'post__author', 'post__category'
+        ).prefetch_related('post__tags')
+
+        if self.request.query_params.get('unfinished') in ('true', '1'):
+            # "Continue reading": started, not finished.
+            queryset = queryset.filter(is_finished=False, progress__gt=0)
+        return queryset
+
+
+class ReadingHistoryClearView(APIView):
+    """DELETE /api/reading-history/ — forget everything, or one post."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ReadingHistorySerializer
+
+    @extend_schema(request=None, responses={204: None})
+    def delete(self, request):
+        queryset = ReadingHistory.objects.filter(user=request.user)
+        slug = request.query_params.get('post')
+        if slug:
+            queryset = queryset.filter(post__slug=slug)
+        removed, _ = queryset.delete()
+        return Response({'removed': removed}, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Series
+# ---------------------------------------------------------------------------
+
+def annotated_series(request):
+    """Series with the counters the cards render, in one query."""
+    queryset = Series.objects.select_related('author').annotate(
+        entry_count=Count('entries', distinct=True),
+    )
+    if request.user.is_authenticated:
+        queryset = queryset.annotate(
+            completed_count=Count(
+                'progress', filter=Q(progress__user=request.user), distinct=True,
+            )
+        )
+    return queryset
+
+
+class SeriesListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/series/   published series
+    POST /api/series/   start one (anybody who can write)
+    """
+
+    permission_classes = [AllowAny]
+    pagination_class = StandardPagination
+    search_fields = ['title', 'description', 'author__username']
+    ordering_fields = ['created_at', 'title', 'entry_count']
+    ordering = ['-created_at']
+
+    def get_permissions(self):
+        return [IsAuthenticated()] if self.request.method == 'POST' else [AllowAny()]
+
+    def get_serializer_class(self):
+        return SeriesWriteSerializer if self.request.method == 'POST' else SeriesSerializer
+
+    def get_queryset(self):
+        queryset = annotated_series(self.request)
+        user = self.request.user
+        if user.is_authenticated:
+            # An author always sees their own unpublished series.
+            return queryset.filter(Q(is_published=True) | Q(author=user))
+        return queryset.filter(is_published=True)
+
+
+class SeriesDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET/PATCH/DELETE /api/series/<slug>/"""
+
+    permission_classes = [IsAuthorOrEditor]
+    lookup_field = 'slug'
+
+    def get_serializer_class(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return SeriesWriteSerializer
+        return SeriesDetailSerializer
+
+    def get_queryset(self):
+        # Parts are ordered by position and carry everything the row renders.
+        entries = SeriesPost.objects.select_related(
+            'post', 'post__author', 'post__category'
+        ).prefetch_related('post__tags').order_by('position')
+        return annotated_series(self.request).prefetch_related(
+            Prefetch('entries', queryset=entries)
+        )
+
+
+class SeriesEntryView(APIView):
+    """
+    POST   /api/series/<slug>/posts/   add a post, optionally at a position
+    DELETE /api/series/<slug>/posts/   remove one (`post` in the body or query)
+
+    Positions are compacted after a removal so a series never shows "part 4"
+    with no part 3.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = SeriesDetailSerializer
+
+    def get_series(self, request, slug):
+        series = get_object_or_404(Series, slug=slug)
+        if series.author_id != request.user.id and not request.user.can_edit_others:
+            return None
+        return series
+
+    def _respond(self, series, request):
+        series = self.get_queryset_detail(request).get(pk=series.pk)
+        return Response(SeriesDetailSerializer(series, context={'request': request}).data)
+
+    def get_queryset_detail(self, request):
+        entries = SeriesPost.objects.select_related(
+            'post', 'post__author', 'post__category'
+        ).prefetch_related('post__tags').order_by('position')
+        return annotated_series(request).prefetch_related(Prefetch('entries', queryset=entries))
+
+    @extend_schema(request=None, responses={200: SeriesDetailSerializer})
+    def post(self, request, slug):
+        series = self.get_series(request, slug)
+        if series is None:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        post = get_object_or_404(
+            Post.objects.visible_to(request.user), slug=request.data.get('post', '')
+        )
+        entry, created = SeriesPost.objects.get_or_create(
+            series=series, post=post, defaults={'position': series.next_position()},
+        )
+        if not created and 'position' in request.data:
+            entry.position = int(request.data['position'])
+            entry.save(update_fields=['position'])
+
+        return self._respond(series, request)
+
+    @extend_schema(request=None, responses={200: SeriesDetailSerializer})
+    def delete(self, request, slug):
+        series = self.get_series(request, slug)
+        if series is None:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        slug_to_remove = request.data.get('post') or request.query_params.get('post', '')
+        SeriesPost.objects.filter(series=series, post__slug=slug_to_remove).delete()
+
+        # Close the gap the removal left.
+        for index, entry in enumerate(series.entries.order_by('position'), start=1):
+            if entry.position != index:
+                entry.position = index
+                entry.save(update_fields=['position'])
+
+        return self._respond(series, request)
+
+
+class SeriesReorderView(APIView):
+    """
+    POST /api/series/<slug>/reorder/ with `{"slugs": [...]}`.
+
+    Takes the whole running order rather than a move-one instruction, which
+    makes drag-and-drop a single request and cannot leave a half-applied order.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = SeriesDetailSerializer
+
+    @extend_schema(request=None, responses={200: SeriesDetailSerializer})
+    def post(self, request, slug):
+        series = get_object_or_404(Series, slug=slug)
+        if series.author_id != request.user.id and not request.user.can_edit_others:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        order = request.data.get('slugs') or []
+        if not isinstance(order, list):
+            return Response({'detail': 'Expected a list of post slugs.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        entries = {entry.post.slug: entry for entry in series.entries.select_related('post')}
+        with transaction.atomic():
+            # Park everything above the real range first: positions are unique
+            # per series, so assigning in place would collide mid-way.
+            offset = len(entries) + 1000
+            for index, entry in enumerate(entries.values()):
+                SeriesPost.objects.filter(pk=entry.pk).update(position=offset + index)
+
+            position = 1
+            for post_slug in order:
+                entry = entries.get(post_slug)
+                if entry is None:
+                    continue
+                SeriesPost.objects.filter(pk=entry.pk).update(position=position)
+                position += 1
+
+            # Anything the client did not mention keeps a stable slot at the end.
+            for post_slug, entry in entries.items():
+                if post_slug not in order:
+                    SeriesPost.objects.filter(pk=entry.pk).update(position=position)
+                    position += 1
+
+        series.refresh_from_db()
+        detail = SeriesEntryView().get_queryset_detail(request).get(pk=series.pk)
+        return Response(SeriesDetailSerializer(detail, context={'request': request}).data)
+
+
+class SeriesProgressView(APIView):
+    """
+    POST   /api/series/<slug>/progress/   mark a part finished
+    DELETE /api/series/<slug>/progress/   mark it unfinished again
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = SeriesDetailSerializer
+
+    def _post_in_series(self, slug, post_slug):
+        series = get_object_or_404(Series, slug=slug)
+        entry = get_object_or_404(SeriesPost, series=series, post__slug=post_slug)
+        return series, entry.post
+
+    @extend_schema(request=None, responses={200: None})
+    def post(self, request, slug):
+        series, post = self._post_in_series(slug, request.data.get('post', ''))
+        SeriesProgress.objects.get_or_create(user=request.user, series=series, post=post)
+        return Response({
+            'completed': SeriesProgress.objects.filter(user=request.user, series=series).count(),
+        })
+
+    @extend_schema(request=None, responses={200: None})
+    def delete(self, request, slug):
+        post_slug = request.data.get('post') or request.query_params.get('post', '')
+        series, post = self._post_in_series(slug, post_slug)
+        SeriesProgress.objects.filter(user=request.user, series=series, post=post).delete()
+        return Response({
+            'completed': SeriesProgress.objects.filter(user=request.user, series=series).count(),
+        })
+
+
+class FeedView(generics.ListAPIView):
+    """
+    GET /api/posts/feed/ — posts from the authors, categories and tags this
+    reader follows.
+
+    Deliberately chronological rather than ranked: the reader chose these
+    subscriptions, so reordering them would be second-guessing an explicit
+    instruction. `?days=` narrows the window.
+    """
+
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filterset_class = PostFilter
+    ordering_fields = ALLOWED_ORDERING
+    ordering = ['-published_at']
+    queryset = Post.objects.none()  # for schema generation only
+
+    @extend_schema(
+        parameters=[OpenApiParameter('days', int, required=False,
+                                     description='Only posts from the last N days.')],
+        responses={200: PostListSerializer(many=True)},
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        from apps.user.models import Follow, TopicFollow
+
+        user = self.request.user
+        authors = Follow.objects.filter(follower=user).values('following_id')
+        categories = TopicFollow.objects.filter(
+            user=user, category__isnull=False
+        ).values('category_id')
+        tags = TopicFollow.objects.filter(user=user, tag__isnull=False).values('tag_id')
+
+        queryset = annotated_posts(self.request).filter(
+            Q(author_id__in=authors)
+            | Q(category_id__in=categories)
+            | Q(tags__id__in=tags)
+        ).exclude(author=user).distinct()
+
+        days = self.request.query_params.get('days')
+        if days and days.isdigit():
+            queryset = queryset.filter(
+                published_at__gte=timezone.now() - timedelta(days=int(days))
+            )
+        return queryset
+
+
+class RecommendedPostsView(generics.ListAPIView):
+    """
+    GET /api/posts/recommended/ — "because you read X".
+
+    Content-based rather than collaborative: the signal is the categories and
+    tags of what this reader has actually liked, bookmarked or finished. That
+    works from the first article, where a collaborative model would need a
+    population of similar readers before it could say anything.
+    """
+
+    serializer_class = PostListSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
+    filter_backends = []
+    queryset = Post.objects.none()  # for schema generation only
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # Everything the reader has shown an interest in.
+        engaged = Post.objects.filter(
+            Q(likes__user=user) | Q(bookmarks__user=user)
+            | Q(reading_history__user=user, reading_history__is_finished=True)
+        ).distinct()
+
+        category_ids = list(
+            engaged.exclude(category__isnull=True).values_list('category_id', flat=True)
+        )
+        tag_ids = list(engaged.values_list('tags__id', flat=True))
+        seen_ids = list(engaged.values_list('id', flat=True))
+
+        queryset = annotated_posts(self.request).exclude(author=user)
+        if not category_ids and not tag_ids:
+            # Nothing to go on yet: fall back to what is doing well, which is a
+            # better cold start than an empty page.
+            return queryset.order_by('-view_count', '-published_at')
+
+        # Rank by how many of the reader's interests a post matches, so a post
+        # sharing both a category and two tags outranks one sharing a tag.
+        return (
+            queryset.filter(Q(category_id__in=category_ids) | Q(tags__id__in=tag_ids))
+            .exclude(id__in=seen_ids)
+            .annotate(
+                overlap=Count('tags', filter=Q(tags__id__in=tag_ids), distinct=True)
+            )
+            .distinct()
+            .order_by('-overlap', '-like_count', '-published_at')
+        )
+
+
+# ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+
+def _requested_days(request, default=30, maximum=365):
+    raw = request.query_params.get('days', '')
+    if raw.isdigit():
+        return max(1, min(int(raw), maximum))
+    return default
+
+
+class PostAnalyticsView(APIView):
+    """
+    GET /api/posts/<slug>/analytics/?days=30
+
+    Only the post's author (or an editor) may read it: view counts and
+    completion rates are the author's business, not a public metric.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostAnalyticsSerializer
+
+    @extend_schema(
+        parameters=[OpenApiParameter('days', int, required=False)],
+        responses={200: PostAnalyticsSerializer},
+    )
+    def get(self, request, slug):
+        post = get_object_or_404(Post.objects.all(), slug=slug)
+        if post.author_id != request.user.id and not request.user.can_edit_others:
+            return Response({'detail': 'You do not have permission to perform this action.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        data = post_analytics(post, _requested_days(request))
+        return Response(PostAnalyticsSerializer(data).data)
+
+
+class AuthorAnalyticsView(APIView):
+    """GET /api/users/me/analytics/?days=30 — totals across everything you publish."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = AuthorAnalyticsSerializer
+
+    @extend_schema(
+        parameters=[OpenApiParameter('days', int, required=False)],
+        responses={200: AuthorAnalyticsSerializer},
+    )
+    def get(self, request):
+        data = author_analytics(request.user, _requested_days(request))
+        return Response(AuthorAnalyticsSerializer(data).data)

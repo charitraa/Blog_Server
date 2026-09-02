@@ -42,16 +42,20 @@ class Comment(models.Model):
     # Set by a moderator. A hidden comment stays in the database (so its replies
     # and reports survive) but is filtered out of every public thread.
     is_hidden = models.BooleanField(default=False)
+    # Pinned by the post's author, to keep one comment at the top of the thread.
+    is_pinned = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = CommentQuerySet.as_manager()
 
     class Meta:
-        ordering = ['-created_at']
+        # Pinned comments float to the top of every ordering.
+        ordering = ['-is_pinned', '-created_at']
         indexes = [
             models.Index(fields=['post', 'parent', '-created_at']),
             models.Index(fields=['author', '-created_at']),
+            models.Index(fields=['post', '-is_pinned', '-created_at']),
         ]
 
     def __str__(self):
@@ -112,3 +116,25 @@ class CommentReport(models.Model):
 
     def __str__(self):
         return f'{self.get_reason_display()} report on {self.comment_id}'
+
+
+class CommentLike(models.Model):
+    """One row per (comment, user). The unique constraint makes liking idempotent."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    comment = models.ForeignKey(Comment, on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='comment_likes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['comment', 'user'], name='unique_comment_like'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.user} likes comment {self.comment_id}'

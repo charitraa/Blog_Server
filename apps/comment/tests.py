@@ -151,10 +151,12 @@ class CommentTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Comment.objects.filter(pk=comment.pk).exists())
 
-    def test_staff_may_moderate_any_comment(self):
+    def test_an_editor_may_moderate_any_comment(self):
         comment = Comment.objects.create(post=self.post, author=self.reader, content='Spam')
         staff = make_user('staff@example.com', 'staff')
-        staff.is_staff = True
+        # Authority to touch someone else's content comes from the role, not
+        # from the Django-admin `is_staff` flag.
+        staff.role = 'editor'
         staff.save()
 
         self.client.force_authenticate(staff)

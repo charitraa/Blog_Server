@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from apps.user.serializers import AuthorSerializer
 
-from .models import Comment, CommentReport
+from .models import Comment, CommentLike, CommentReport
 
 
 class CommentSerializer(serializers.ModelSerializer):
@@ -18,13 +18,17 @@ class CommentSerializer(serializers.ModelSerializer):
     replies = serializers.SerializerMethodField()
     reply_count = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
+    can_pin = serializers.SerializerMethodField()
+    like_count = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
         fields = [
             'id', 'post', 'parent', 'author', 'content',
-            'is_edited', 'is_hidden', 'created_at', 'updated_at',
-            'replies', 'reply_count', 'can_edit',
+            'is_edited', 'is_hidden', 'is_pinned', 'created_at', 'updated_at',
+            'replies', 'reply_count', 'can_edit', 'can_pin',
+            'like_count', 'is_liked',
         ]
         read_only_fields = fields
 
@@ -52,7 +56,34 @@ class CommentSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
-        return obj.author_id == request.user.id or request.user.is_staff
+        return obj.author_id == request.user.id or request.user.can_edit_others
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_can_pin(self, obj):
+        """Pinning belongs to whoever owns the conversation: the post's author."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        if obj.parent_id is not None:
+            return False  # only top-level comments pin
+        return obj.post.author_id == request.user.id or request.user.can_moderate
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_like_count(self, obj):
+        annotated = getattr(obj, 'like_total', None)
+        if annotated is not None:
+            return annotated
+        return obj.likes.count()
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_is_liked(self, obj):
+        annotated = getattr(obj, 'liked_by_me', None)
+        if annotated is not None:
+            return bool(annotated)
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return CommentLike.objects.filter(comment=obj, user=request.user).exists()
 
 
 class CommentWriteSerializer(serializers.ModelSerializer):

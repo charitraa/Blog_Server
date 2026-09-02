@@ -5,7 +5,10 @@ from rest_framework import serializers
 from apps.user.serializers import AuthorSerializer, absolute_url
 from blog_server.validators import validate_image_upload
 
-from .models import Bookmark, Category, EditorImage, Like, Post, Tag
+from .models import (
+    Bookmark, Category, EditorImage, Like, Post, PostRevision,
+    ReadingHistory, Series, SeriesPost, Tag,
+)
 from .utils import build_excerpt, plain_text, sanitize_html
 
 
@@ -102,9 +105,10 @@ class PostListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Post
         fields = [
-            'id', 'title', 'slug', 'excerpt', 'cover_image',
-            'author', 'category', 'tags', 'status',
-            'published_at', 'created_at', 'updated_at',
+            'id', 'title', 'subtitle', 'slug', 'excerpt', 'cover_image',
+            'author', 'category', 'tags', 'status', 'visibility',
+            'published_at', 'scheduled_for', 'created_at', 'updated_at',
+            'is_featured', 'is_archived',
             'reading_time', 'like_count', 'comment_count', 'view_count',
             'is_liked', 'is_bookmarked',
         ]
@@ -155,7 +159,9 @@ class PostAuthorDetailSerializer(PostDetailSerializer):
     preview_token = serializers.UUIDField(read_only=True)
 
     class Meta(PostDetailSerializer.Meta):
-        fields = PostDetailSerializer.Meta.fields + ['preview_token']
+        fields = PostDetailSerializer.Meta.fields + [
+            'preview_token', 'seo_title', 'seo_description', 'canonical_url',
+        ]
         read_only_fields = fields
 
 
@@ -173,8 +179,22 @@ class PostWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Post
-        fields = ['id', 'title', 'excerpt', 'content', 'cover_image', 'category', 'tags', 'status']
+        fields = [
+            'id', 'title', 'subtitle', 'excerpt', 'content', 'cover_image',
+            'category', 'tags', 'status', 'visibility', 'scheduled_for',
+            'seo_title', 'seo_description', 'canonical_url',
+        ]
         read_only_fields = ['id']
+
+    def validate_scheduled_for(self, value):
+        """A schedule that is already in the past is almost certainly a mistake."""
+        from django.utils import timezone
+
+        if value and value <= timezone.now():
+            raise serializers.ValidationError(
+                'Pick a time in the future, or publish the post now instead.'
+            )
+        return value
 
     def validate_title(self, value):
         value = ' '.join(value.split())
@@ -198,8 +218,34 @@ class PostWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(list(exc.messages))
         return value
 
+    def validate_status(self, value):
+        """
+        Publishing is a capability, not something the client decides.
+
+        A contributor can save drafts all day; asking for `published` is
+        refused here rather than silently downgraded, so the editor can tell
+        the writer what happened.
+        """
+        request = self.context.get('request')
+        going_live = value in (Post.Status.PUBLISHED, Post.Status.SCHEDULED)
+        if going_live and request and request.user.is_authenticated:
+            if not request.user.can_publish:
+                raise serializers.ValidationError(
+                    'Your account can save drafts but cannot publish them. '
+                    'Ask an editor to review and publish this post.'
+                )
+        return value
+
     def validate(self, attrs):
         status = attrs.get('status', getattr(self.instance, 'status', Post.Status.DRAFT))
+
+        if status == Post.Status.SCHEDULED:
+            when = attrs.get('scheduled_for', getattr(self.instance, 'scheduled_for', None))
+            if when is None:
+                raise serializers.ValidationError(
+                    {'scheduled_for': 'Choose when this post should go live.'}
+                )
+
         if status == Post.Status.PUBLISHED:
             content = attrs.get('content', getattr(self.instance, 'content', ''))
             if len(plain_text(content)) < 20:
@@ -280,3 +326,213 @@ class EditorImageSerializer(serializers.ModelSerializer):
         return EditorImage.objects.create(
             uploaded_by=self.context['request'].user, **validated_data
         )
+
+
+class PostRevisionSerializer(serializers.ModelSerializer):
+    """One entry in a post's history. The body is included so the UI can diff."""
+
+    created_by = AuthorSerializer(read_only=True)
+
+    class Meta:
+        model = PostRevision
+        fields = ['id', 'title', 'subtitle', 'excerpt', 'content', 'note',
+                  'created_by', 'created_at']
+        read_only_fields = fields
+
+
+class PostRevisionListSerializer(serializers.ModelSerializer):
+    """
+    History list without the bodies.
+
+    A post with fifty revisions would otherwise send fifty copies of the
+    article just to render a list of dates.
+    """
+
+    created_by = AuthorSerializer(read_only=True)
+    word_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PostRevision
+        fields = ['id', 'title', 'note', 'created_by', 'created_at', 'word_count']
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_word_count(self, obj):
+        return len(plain_text(obj.content).split())
+
+
+class SeriesEntrySerializer(serializers.ModelSerializer):
+    """A post's slot in a series, with just enough of the post to render a row."""
+
+    post = PostListSerializer(read_only=True)
+
+    class Meta:
+        model = SeriesPost
+        fields = ['id', 'position', 'post']
+        read_only_fields = fields
+
+
+class SeriesSerializer(serializers.ModelSerializer):
+    """
+    A series without its parts, for lists.
+
+    `progress` is the signed-in reader's own completion count, which is what
+    makes "3 of 7" possible without a second request.
+    """
+
+    author = AuthorSerializer(read_only=True)
+    cover_image = serializers.SerializerMethodField()
+    post_count = serializers.SerializerMethodField()
+    completed_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Series
+        fields = [
+            'id', 'title', 'slug', 'description', 'cover_image', 'author',
+            'is_published', 'post_count', 'completed_count', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'slug', 'author', 'post_count', 'completed_count',
+                            'created_at', 'updated_at']
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_cover_image(self, obj):
+        return absolute_url(self.context.get('request'), obj.cover)
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_post_count(self, obj):
+        annotated = getattr(obj, 'entry_count', None)
+        return annotated if annotated is not None else obj.entries.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_completed_count(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return 0
+        annotated = getattr(obj, 'completed_count', None)
+        if annotated is not None:
+            return annotated
+        return obj.progress.filter(user=request.user).count()
+
+
+class SeriesDetailSerializer(SeriesSerializer):
+    """A series with its ordered parts and the reader's place in it."""
+
+    entries = SeriesEntrySerializer(many=True, read_only=True)
+    completed_post_ids = serializers.SerializerMethodField()
+    next_post_slug = serializers.SerializerMethodField()
+
+    class Meta(SeriesSerializer.Meta):
+        fields = SeriesSerializer.Meta.fields + [
+            'entries', 'completed_post_ids', 'next_post_slug',
+        ]
+
+    @extend_schema_field(serializers.ListField(child=serializers.UUIDField()))
+    def get_completed_post_ids(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return []
+        return [str(pk) for pk in obj.progress.filter(user=request.user)
+                .values_list('post_id', flat=True)]
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_next_post_slug(self, obj):
+        """The first part the reader has not finished — where 'continue' goes."""
+        done = set(self.get_completed_post_ids(obj))
+        for entry in obj.entries.all():
+            if str(entry.post_id) not in done:
+                return entry.post.slug
+        return None
+
+
+class SeriesWriteSerializer(serializers.ModelSerializer):
+    """Create/update a series. The author comes from the request."""
+
+    cover_image = serializers.ImageField(source='cover', required=False, allow_null=True)
+
+    class Meta:
+        model = Series
+        fields = ['id', 'title', 'description', 'cover_image', 'is_published']
+        read_only_fields = ['id']
+
+    def validate_title(self, value):
+        value = ' '.join(value.split())
+        if len(value) < 3:
+            raise serializers.ValidationError('Give the series a name of at least 3 characters.')
+        return value
+
+    def create(self, validated_data):
+        return Series.objects.create(author=self.context['request'].user, **validated_data)
+
+    def to_representation(self, instance):
+        return SeriesSerializer(instance, context=self.context).data
+
+
+class ReadingHistorySerializer(serializers.ModelSerializer):
+    """One row of "recently read", with the post it points at."""
+
+    post = PostListSerializer(read_only=True)
+
+    class Meta:
+        model = ReadingHistory
+        fields = ['id', 'post', 'progress', 'is_finished', 'last_read_at']
+        read_only_fields = fields
+
+
+class ReadingProgressSerializer(serializers.Serializer):
+    """Body of `POST /api/posts/<slug>/progress/`."""
+
+    progress = serializers.IntegerField(min_value=0, max_value=100)
+    is_finished = serializers.BooleanField(required=False, default=False)
+
+
+class DailyCountSerializer(serializers.Serializer):
+    """One day of a time series. Quiet days are present with a zero."""
+
+    date = serializers.DateField()
+    count = serializers.IntegerField()
+
+
+class TopPostSerializer(serializers.Serializer):
+    slug = serializers.SlugField()
+    title = serializers.CharField()
+    views = serializers.IntegerField()
+    likes = serializers.IntegerField()
+    comments = serializers.IntegerField()
+
+
+class PostAnalyticsSerializer(serializers.Serializer):
+    """Shape of `GET /api/posts/<slug>/analytics/`. Read-only."""
+
+    slug = serializers.SlugField()
+    title = serializers.CharField()
+    published_at = serializers.DateTimeField(allow_null=True)
+    total_views = serializers.IntegerField()
+    unique_viewers = serializers.IntegerField()
+    views_in_period = serializers.IntegerField()
+    likes = serializers.IntegerField()
+    bookmarks = serializers.IntegerField()
+    comments = serializers.IntegerField()
+    readers = serializers.IntegerField()
+    finished_readers = serializers.IntegerField()
+    average_progress = serializers.IntegerField()
+    completion_rate = serializers.FloatField()
+    reading_time = serializers.IntegerField()
+    daily_views = DailyCountSerializer(many=True)
+
+
+class AuthorAnalyticsSerializer(serializers.Serializer):
+    """Shape of `GET /api/users/me/analytics/`. Read-only."""
+
+    total_posts = serializers.IntegerField()
+    published_posts = serializers.IntegerField()
+    draft_posts = serializers.IntegerField()
+    scheduled_posts = serializers.IntegerField()
+    total_views = serializers.IntegerField()
+    unique_viewers = serializers.IntegerField()
+    views_in_period = serializers.IntegerField()
+    total_likes = serializers.IntegerField()
+    total_comments = serializers.IntegerField()
+    total_bookmarks = serializers.IntegerField()
+    followers = serializers.IntegerField()
+    daily_views = DailyCountSerializer(many=True)
+    top_posts = TopPostSerializer(many=True)

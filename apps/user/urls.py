@@ -1,6 +1,6 @@
 from django.urls import path
 
-from apps.post.views import AuthorPostListView
+from apps.post.views import AuthorAnalyticsView, AuthorPostListView
 
 from . import views
 
@@ -12,6 +12,7 @@ urlpatterns = [
     path('me/password/', views.MePasswordView.as_view(), name='user-me-password'),
     path('me/email/', views.MeEmailView.as_view(), name='user-me-email'),
     path('me/dashboard/', views.MeDashboardView.as_view(), name='user-me-dashboard'),
+    path('me/analytics/', AuthorAnalyticsView.as_view(), name='user-me-analytics'),
 
     path('<str:username>/', views.UserDetailView.as_view(), name='user-detail'),
     path('<str:username>/posts/', AuthorPostListView.as_view(), name='user-posts'),
