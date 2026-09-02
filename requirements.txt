@@ -12,6 +12,11 @@ drf-spectacular==0.28.0
 pillow==11.3.0
 bleach==6.2.0
 
+# Persistent media storage. Render's filesystem is ephemeral, so uploads go to
+# Cloudinary in production; without credentials the app falls back to local media.
+cloudinary==1.46.2
+django-cloudinary-storage==0.3.0
+
 # Configuration & integrations
 python-decouple==3.8
 requests==2.32.5

@@ -39,3 +39,5 @@ Thumbs.db
 
 
 logs/
+# File-based cache directory (throttle counters).
+.cache/

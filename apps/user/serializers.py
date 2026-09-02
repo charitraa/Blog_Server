@@ -9,13 +9,23 @@ User = get_user_model()
 
 
 def absolute_url(request, file_field):
-    """Absolute URL for a FileField, or None when nothing is stored."""
+    """
+    Absolute URL for a FileField, or None when nothing is stored.
+
+    With local storage `url` is a site-relative path that needs the request's
+    host prepended. With Cloudinary it is already an absolute https URL, so it
+    is returned untouched — prepending the API host would produce nonsense like
+    `https://api.example.com/https://res.cloudinary.com/...`.
+    """
     if not file_field:
         return None
     try:
         url = file_field.url
     except ValueError:
         return None
+
+    if url.startswith(('http://', 'https://', '//')):
+        return url
     return request.build_absolute_uri(url) if request else url
 
 

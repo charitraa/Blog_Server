@@ -1,5 +1,7 @@
 from django.urls import path, re_path
 
+from apps.ai.views import AskAboutPostView
+
 from . import views
 
 # Mounted under /api/ (see blog_server/urls.py). The legacy /post/ prefix is
@@ -28,6 +30,7 @@ urlpatterns = [
          name='post-progress'),
     path('posts/<str:slug>/analytics/', views.PostAnalyticsView.as_view(),
          name='post-analytics'),
+    path('posts/<str:slug>/ask/', AskAboutPostView.as_view(), name='post-ask'),
     # The action is pinned to a fixed set rather than <str:action>, which would
     # also swallow sibling routes like posts/<slug>/comments/.
     re_path(

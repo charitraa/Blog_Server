@@ -48,6 +48,10 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.sitemaps',
+    # Cloudinary. `cloudinary_storage` must precede staticfiles so its storage
+    # backends are importable; `cloudinary` carries the SDK configuration.
+    'cloudinary_storage',
+    'cloudinary',
     'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
     'django_filters',
@@ -58,6 +62,7 @@ INSTALLED_APPS = [
     'apps.comment',
     'apps.newsletter',
     'apps.notification',
+    'apps.ai',
 ]
 
 MIDDLEWARE = [
@@ -168,8 +173,69 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
+# Local media. Still used in development, and still the fallback whenever
+# Cloudinary is not configured, so a checkout with no credentials runs exactly
+# as it always did.
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+
+# ---------------------------------------------------------------------------
+# Cloudinary (user-uploaded media)
+# ---------------------------------------------------------------------------
+#
+# Render's filesystem is ephemeral: anything written to MEDIA_ROOT is lost on
+# the next deploy or restart. Uploads therefore go to Cloudinary in production.
+#
+# Static files are deliberately NOT moved there — they are built into the image
+# by `collectstatic` and served by the app, which is already reliable on Render.
+
+CLOUDINARY_CLOUD_NAME = config('CLOUDINARY_CLOUD_NAME', default='')
+CLOUDINARY_API_KEY = config('CLOUDINARY_API_KEY', default='')
+CLOUDINARY_API_SECRET = config('CLOUDINARY_API_SECRET', default='')
+
+# All three are required; a partial configuration would fail at upload time
+# rather than at boot, which is a much worse place to discover it.
+USE_CLOUDINARY = all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
+
+if USE_CLOUDINARY:
+    CLOUDINARY_STORAGE = {
+        'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
+        'API_KEY': CLOUDINARY_API_KEY,
+        'API_SECRET': CLOUDINARY_API_SECRET,
+        # Always hand the frontend an https URL; a mixed-content image would be
+        # blocked outright by the browser.
+        'SECURE': True,
+    }
+
+    STORAGES = {
+        'default': {
+            'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+else:
+    STORAGES = {
+        'default': {
+            'BACKEND': 'django.core.files.storage.FileSystemStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+
+    if not DEBUG:
+        # Production without Cloudinary means uploads vanish on the next deploy.
+        # Worth a loud line in the log rather than a silent data-loss bug.
+        import logging as _logging
+
+        _logging.getLogger('django').warning(
+            'Cloudinary is not configured and DEBUG is off. Uploaded media will '
+            'be written to the local filesystem and lost on the next restart. '
+            'Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET.'
+        )
 
 # Hard ceiling for uploads handled in memory. Per-field limits live in the
 # serializers (see blog_server/validators.py).
@@ -219,6 +285,9 @@ REST_FRAMEWORK = {
         'auth': config('THROTTLE_AUTH', default='20/hour'),
         'register': config('THROTTLE_REGISTER', default='10/hour'),
         'write': config('THROTTLE_WRITE', default='120/hour'),
+        # Every AI call costs money at the provider, so it gets its own budget
+        # rather than sharing the general write allowance.
+        'ai': config('THROTTLE_AI', default='40/hour'),
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
@@ -357,28 +426,57 @@ PASSWORD_RESET_TTL_MINUTES = config('PASSWORD_RESET_TTL_MINUTES', default=30, ca
 
 
 # ---------------------------------------------------------------------------
+# AI assistant
+# ---------------------------------------------------------------------------
+#
+# Optional. With no API key the endpoints report themselves as unavailable and
+# the editor hides the assistant, rather than offering buttons that fail.
+
+AI_ENABLED = config('AI_ENABLED', default=True, cast=bool)
+AI_PREFERRED_PROVIDER = config('AI_PREFERRED_PROVIDER', default='nvidia')
+
+# NVIDIA NIM speaks the OpenAI chat-completions dialect.
+NVIDIA_BASE_URL = config('NVIDIA_BASE_URL', default='https://integrate.api.nvidia.com/v1')
+NVIDIA_API_KEY = config('NVIDIA_API_KEY', default='')
+
+# Main model: returns clean answers with its reasoning in a separate field.
+NVIDIA_MODEL = config('NVIDIA_MODEL', default='openai/gpt-oss-120b')
+# Smaller sibling for short, cheap tasks (tags, proofreading, social posts).
+NVIDIA_FAST_MODEL = config('NVIDIA_FAST_MODEL', default='openai/gpt-oss-20b')
+# Purpose-built models beat the general one at their own job.
+NVIDIA_TRANSLATE_MODEL = config(
+    'NVIDIA_TRANSLATE_MODEL', default='nvidia/riva-translate-4b-instruct-v2',
+)
+NVIDIA_SAFETY_MODEL = config(
+    'NVIDIA_SAFETY_MODEL', default='nvidia/llama-3.1-nemoguard-8b-content-safety',
+)
+
+
+# ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
-# Throttle counters live here. The in-memory default is per-process, so a
-# multi-worker deployment should point REDIS_URL at a shared cache — otherwise
-# each worker enforces its own separate budget.
-REDIS_URL = config('REDIS_URL', default='')
+# Throttle counters live here.
+#
+# A file-based cache rather than in-memory: LocMemCache is per-process, so a
+# multi-worker deployment would give every worker its own separate rate limit.
+# Backing it with a directory means all workers on a host share one budget with
+# no extra service to run.
+CACHE_DIR = os.path.join(BASE_DIR, '.cache')
 
-if REDIS_URL:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': REDIS_URL,
-        }
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': CACHE_DIR,
+        'OPTIONS': {
+            # Old entries are culled when the directory reaches this size, so a
+            # busy site cannot fill the disk with expired throttle counters.
+            'MAX_ENTRIES': 5000,
+        },
     }
-else:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'blog-server',
-        }
-    }
+}
+
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Under the test runner every request comes from the same address, so a shared
 # throttle counter would leak between unrelated tests and fail them at random.

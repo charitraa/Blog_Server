@@ -38,6 +38,9 @@ React frontend.
 - 🚩 Comment reporting with an admin moderation queue (`is_hidden`)
 - 📬 Newsletter with double opt-in and one-click unsubscribe
 - 🌐 RSS + Atom feeds, `sitemap.xml` and `robots.txt`, all pointing at the frontend
+- 🖼️ Cloudinary for uploaded media, so files survive a deploy on ephemeral hosts
+- 🤖 Optional AI assistant (NVIDIA NIM): titles, SEO, summaries, outlines,
+  rewriting, proofreading, translation and reader Q&A
 - 📖 Generated OpenAPI schema that matches the implementation
 
 ## 📂 Folder Structure
@@ -185,6 +188,92 @@ the access token in memory and store nothing.
 
 The original `/user/`, `/post/` and `/comment/` routes are still mounted as aliases onto
 these same views, so existing clients keep working.
+
+## 🖼️ Media storage (Cloudinary)
+
+Render's filesystem is **ephemeral**: anything written to `media/` is lost on the
+next deploy or restart. Uploads therefore go to Cloudinary in production.
+
+Cloudinary is **opt-in**. With no credentials the app writes to `media/` exactly
+as it always did, so a fresh checkout needs no account to run.
+
+```bash
+# .env — all three required; two of three stays on local storage
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+```
+
+Find them at <https://console.cloudinary.com> under *Dashboard → Product
+Environment*. `CLOUDINARY_API_SECRET` is **server-side only** — it is never sent
+to the frontend, and no endpoint echoes it back.
+
+Static files stay on the app server: `collectstatic` already handles them
+reliably and there is nothing to gain from moving them.
+
+Uploads are organised by the `upload_to` already on each model:
+
+| Folder | Contents |
+| --- | --- |
+| `user_photos/` | Profile pictures |
+| `user_post/` | Post cover images |
+| `post_content/` | Images placed inside an article |
+| `series/` | Series cover images |
+
+### Migrating media you already have
+
+```bash
+python manage.py migrate_media_to_cloudinary            # dry run — reports only
+python manage.py migrate_media_to_cloudinary --apply    # upload and repoint
+python manage.py migrate_media_to_cloudinary --apply --model post.Post
+```
+
+It never deletes local files, skips anything already on Cloudinary (so it is safe
+to re-run), and leaves a row untouched if its upload fails. Check the site before
+removing `media/` yourself — and keep a backup.
+
+## 🤖 AI assistant (optional)
+
+Author-facing tools backed by [NVIDIA NIM](https://build.nvidia.com). Leave
+`NVIDIA_API_KEY` blank and the endpoints report themselves unavailable, so the
+editor hides the assistant rather than offering buttons that fail.
+
+```bash
+AI_ENABLED=True
+AI_PREFERRED_PROVIDER=nvidia
+NVIDIA_API_KEY=nvapi-...
+NVIDIA_MODEL=openai/gpt-oss-120b
+NVIDIA_FAST_MODEL=openai/gpt-oss-20b
+THROTTLE_AI=40/hour
+```
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /api/ai/status/` | Whether the assistant is available (no credentials exposed) |
+| `POST /api/ai/titles/` | Title options for a draft |
+| `POST /api/ai/seo/` | Search title, description and tags |
+| `POST /api/ai/summary/` | A short summary |
+| `POST /api/ai/outline/` | An outline from a topic |
+| `POST /api/ai/rewrite/` | Rewrite a passage (clearer / shorter / friendlier / formal) |
+| `POST /api/ai/proofread/` | Spelling and grammar only |
+| `POST /api/ai/social/` | A short announcement post |
+| `POST /api/ai/translate/` | Translate a passage |
+| `POST /api/posts/{slug}/ask/` | Answer a reader's question from the article |
+
+Every call is triggered explicitly by a signed-in author, and none of them
+writes to the database — suggestions are returned for the author to accept or
+ignore. They share a throttle scope of their own because each request costs
+money at the provider.
+
+**Measured limitations**, not assumed:
+
+- The configured models reason before answering and that reasoning is billed
+  against `max_tokens`, so the client budgets generously and retries once when a
+  reply is truncated.
+- The safety model catches harassment, threats and hate. It does **not** catch
+  advertising spam — that still relies on reader reports.
+- `riva-translate` returns Hindi when asked for Nepali. Verify any language
+  before relying on it.
 
 ## 🚀 Deploying to PythonAnywhere (Free Tier)
 1. **Create a PythonAnywhere Account**  
