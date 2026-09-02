@@ -101,6 +101,7 @@ class PostListSerializer(serializers.ModelSerializer):
     comment_count = serializers.IntegerField(read_only=True)
     is_liked = serializers.SerializerMethodField()
     is_bookmarked = serializers.SerializerMethodField()
+    my_reaction = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -110,7 +111,7 @@ class PostListSerializer(serializers.ModelSerializer):
             'published_at', 'scheduled_for', 'created_at', 'updated_at',
             'is_featured', 'is_archived',
             'reading_time', 'like_count', 'comment_count', 'view_count',
-            'is_liked', 'is_bookmarked',
+            'is_liked', 'is_bookmarked', 'my_reaction',
         ]
         read_only_fields = fields
 
@@ -128,6 +129,15 @@ class PostListSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
         return Like.objects.filter(post=obj, user=request.user).exists()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_my_reaction(self, obj):
+        """Which reaction the reader chose, so the UI can highlight it."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        like = Like.objects.filter(post=obj, user=request.user).only('kind').first()
+        return like.kind if like else None
 
     @extend_schema_field(serializers.BooleanField())
     def get_is_bookmarked(self, obj):
@@ -323,10 +333,14 @@ class PostWriteSerializer(serializers.ModelSerializer):
 
 
 class LikeStateSerializer(serializers.Serializer):
-    """Response of the like/unlike endpoints."""
+    """Response of the reaction endpoints."""
 
     is_liked = serializers.BooleanField()
     like_count = serializers.IntegerField()
+    # Which reaction this reader chose, or null once removed.
+    my_reaction = serializers.CharField(allow_null=True, required=False)
+    # Per-kind totals, so the UI need not ask twice.
+    reactions = serializers.DictField(child=serializers.IntegerField(), required=False)
 
 
 class BookmarkStateSerializer(serializers.Serializer):

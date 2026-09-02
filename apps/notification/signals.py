@@ -52,6 +52,11 @@ def notify_on_comment(sender, instance, created, **kwargs):
     if not created:
         return
 
+    # Anyone named with @handle, minus the people already notified below.
+    from apps.comment.mentions import notify_mentioned
+
+    notify_mentioned(instance)
+
     if instance.parent_id:
         # A reply notifies the parent comment's author, not the post's.
         _notify(

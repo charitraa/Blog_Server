@@ -29,6 +29,7 @@ class Notification(models.Model):
         SUBMITTED = 'submitted', 'submitted a post for review'
         APPROVED = 'approved', 'published your post'
         CHANGES = 'changes', 'asked for changes on your post'
+        MENTION = 'mention', 'mentioned you in a comment'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipient = models.ForeignKey(

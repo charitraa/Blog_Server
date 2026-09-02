@@ -336,11 +336,29 @@ class Post(models.Model):
 
 
 class Like(models.Model):
-    """One row per (user, post). The unique constraint is what makes likes idempotent."""
+    """
+    A reader's reaction to a post. One row per (user, post).
+
+    Kept as a single row with a `kind` rather than one table per reaction, and
+    one row per person rather than one per reaction: choosing "insightful"
+    replaces "like" instead of stacking, so the total is always the number of
+    people who reacted. A post showing 40 reactions from 12 readers would be
+    a vanity metric, not a signal.
+
+    The model is still called Like, and `likes` is still the related name, so
+    every existing query, counter and API field keeps working.
+    """
+
+    class Kind(models.TextChoices):
+        LIKE = 'like', '👍 Like'
+        LOVE = 'love', '❤️ Love'
+        INSIGHTFUL = 'insightful', '💡 Insightful'
+        FUNNY = 'funny', '😄 Funny'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='likes')
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='likes')
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.LIKE)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

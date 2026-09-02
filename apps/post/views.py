@@ -206,11 +206,14 @@ class PostDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class PostLikeView(APIView):
     """
-    POST   /api/posts/<slug>/like/   like
-    DELETE /api/posts/<slug>/like/   unlike
+    POST   /api/posts/<slug>/like/   react, optionally with `{"kind": "love"}`
+    DELETE /api/posts/<slug>/like/   remove your reaction
 
-    Both are idempotent: the unique (post, user) constraint means a double tap
-    can never create a second like, whatever the client does.
+    One reaction per person: posting a different kind replaces the previous one
+    rather than adding to it, so the count is always "how many people reacted".
+
+    `kind` defaults to `like`, which keeps every existing client working
+    unchanged.
     """
 
     permission_classes = [IsAuthenticated]
@@ -219,26 +222,47 @@ class PostLikeView(APIView):
     def get_post(self, slug):
         return get_object_or_404(Post.objects.visible_to(self.request.user), slug=slug)
 
-    def _state(self, post, is_liked):
-        return Response(LikeStateSerializer({
+    def _state(self, post, is_liked, kind=None):
+        likes = Like.objects.filter(post=post)
+        return Response({
             'is_liked': is_liked,
-            'like_count': Like.objects.filter(post=post).count(),
-        }).data)
+            'like_count': likes.count(),
+            'my_reaction': kind,
+            # Per-kind totals, so the UI can show which reaction won without a
+            # second request.
+            'reactions': {
+                row['kind']: row['total']
+                for row in likes.values('kind').annotate(total=Count('id'))
+            },
+        })
 
     @extend_schema(request=None, responses={200: LikeStateSerializer})
     def post(self, request, slug):
         post = self.get_post(slug)
+
+        kind = request.data.get('kind', Like.Kind.LIKE)
+        if kind not in Like.Kind.values:
+            return Response({'detail': f'Unknown reaction "{kind}".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            Like.objects.get_or_create(post=post, user=request.user)
+            with transaction.atomic():
+                # update_or_create, not get_or_create: switching reaction should
+                # change the existing row, never add a second one.
+                Like.objects.update_or_create(
+                    post=post, user=request.user, defaults={'kind': kind},
+                )
         except IntegrityError:
-            pass  # Won a race with another request from the same user.
-        return self._state(post, True)
+            # A simultaneous double-tap; the row exists either way.
+            pass
+
+        return self._state(post, True, kind)
 
     @extend_schema(request=None, responses={200: LikeStateSerializer})
     def delete(self, request, slug):
         post = self.get_post(slug)
         Like.objects.filter(post=post, user=request.user).delete()
-        return self._state(post, False)
+        return self._state(post, False, None)
 
 
 class TrendingPostListView(generics.ListAPIView):
@@ -592,7 +616,11 @@ class PostLifecycleView(APIView):
             return None
         return post
 
-    @extend_schema(request=None, responses={200: PostAuthorDetailSerializer})
+    @extend_schema(
+        operation_id='posts_lifecycle_action',
+        request=None,
+        responses={200: PostAuthorDetailSerializer},
+    )
     def post(self, request, slug, action):
         if action not in self.ACTIONS:
             return Response({'detail': f'Unknown action "{action}".'},

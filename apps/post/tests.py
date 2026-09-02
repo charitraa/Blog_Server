@@ -315,11 +315,17 @@ class LikeTests(APITestCase):
 
     def test_like_then_unlike(self):
         self.client.force_authenticate(self.reader)
+
+        # Asserted field by field rather than as a whole dict: the response
+        # gained reaction fields later, and a payload-equality check turns every
+        # additive change into a false failure.
         liked = self.client.post(f'/api/posts/{self.post.slug}/like/')
-        self.assertEqual(liked.data, {'is_liked': True, 'like_count': 1})
+        self.assertTrue(liked.data['is_liked'])
+        self.assertEqual(liked.data['like_count'], 1)
 
         unliked = self.client.delete(f'/api/posts/{self.post.slug}/like/')
-        self.assertEqual(unliked.data, {'is_liked': False, 'like_count': 0})
+        self.assertFalse(unliked.data['is_liked'])
+        self.assertEqual(unliked.data['like_count'], 0)
 
     def test_liking_twice_creates_only_one_like(self):
         self.client.force_authenticate(self.reader)
