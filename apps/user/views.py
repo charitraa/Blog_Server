@@ -317,7 +317,15 @@ class RefreshView(APIView):
             refresh = RefreshToken(raw)
             user = User.objects.filter(pk=refresh.payload.get('user_id'), is_active=True).first()
             if user is None:
-                return Response({'detail': 'Invalid refresh token.'}, status=status.HTTP_401_UNAUTHORIZED)
+                # The token itself is well formed and unexpired, but names a
+                # user who has since been deleted or deactivated. Clearing the
+                # cookies matters as much as the status code: they are httpOnly,
+                # so the browser will otherwise resend this same dead token on
+                # every request forever and the visitor has no way to stop it.
+                return clear_auth_cookies(
+                    Response({'detail': 'Invalid refresh token.'},
+                             status=status.HTTP_401_UNAUTHORIZED)
+                )
 
             if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS'):
                 if settings.SIMPLE_JWT.get('BLACKLIST_AFTER_ROTATION'):

@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
@@ -455,3 +456,64 @@ class SocialAuthTests(APITestCase):
 
     def setUp(self):
         self.existing = make_user()
+
+
+@NO_VERIFICATION
+class StaleCookieTests(APITestCase):
+    """
+    A cookie naming a user who no longer exists must not take the site down.
+
+    This is the shape of a real outage: the production database was rebuilt, so
+    every browser still holding a login cookie was presenting a perfectly valid,
+    unexpired token for a user row that had ceased to exist. Because the cookie
+    is sent on every request and the failure was raised rather than ignored, the
+    401 landed on public endpoints too — the frontend could not even fetch the
+    site config it needs to render, and being httpOnly, the cookie could not be
+    cleared from the client.
+    """
+
+    def setUp(self):
+        self.user = make_user()
+        response = self.client.post(
+            '/api/auth/login/',
+            {'email': self.user.email, 'password': 'StrongPass!234'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Cookies now live on the test client exactly as they would in a browser.
+        self.user.delete()
+
+    def test_public_endpoint_still_answers(self):
+        response = self.client.get('/api/config/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_protected_endpoint_asks_for_credentials_instead_of_erroring(self):
+        response = self.client.get('/api/users/me/')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_refusing_a_refresh_clears_the_cookies(self):
+        response = self.client.post('/api/auth/refresh/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        # An empty value with a past expiry is how a cookie is deleted; without
+        # this the browser resends the dead token on every request forever.
+        for name in (settings.AUTH_COOKIE_NAME, settings.REFRESH_COOKIE_NAME):
+            self.assertIn(name, response.cookies)
+            self.assertEqual(response.cookies[name].value, '')
+
+    def test_a_garbage_cookie_is_ignored_rather_than_fatal(self):
+        self.client.cookies[settings.AUTH_COOKIE_NAME] = 'not-a-jwt'
+        self.assertEqual(self.client.get('/api/config/').status_code, status.HTTP_200_OK)
+
+    def test_a_valid_header_still_wins_over_a_dead_cookie(self):
+        survivor = make_user('survivor@example.com', 'survivor')
+        login = self.client.post(
+            '/api/auth/login/',
+            {'email': survivor.email, 'password': 'StrongPass!234'},
+            format='json',
+        )
+        token = login.data['access']
+        # Put a dead token back in the cookie the login just overwrote.
+        self.client.cookies[settings.AUTH_COOKIE_NAME] = 'not-a-jwt'
+        response = self.client.get('/api/users/me/', HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['email'], survivor.email)
