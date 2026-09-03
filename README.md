@@ -70,11 +70,17 @@ Blog_Server/
 │   │   ├── utils.py            # Sanitisation, slugs, reading time
 │   │   ├── filters.py          # Explicit, allowlisted query filters
 │   │   ├── feeds.py            # RSS and Atom syndication
-│   │   └── management/commands/seed_categories.py
+│   │   └── management/commands/
+│   │       ├── seed_all.py         # Everything below, in order (used by build.sh)
+│   │       ├── seed_categories.py  # Baseline categories
+│   │       ├── seed_tags.py        # Baseline tags
+│   │       ├── seed_demo.py        # Sample users, posts and comments (dev only)
+│   │       └── publish_scheduled.py
 │   ├── comment/            # Comments, replies and moderation reports
 │   ├── notification/       # Signal-driven notification inbox
 │   └── newsletter/         # Double opt-in mailing list
 ├── media/                  # User uploads
+├── build.sh                # Render build command: install, collectstatic, seed
 ├── .env.example            # Copy to .env
 ├── manage.py
 └── requirements.txt
@@ -110,26 +116,134 @@ Leaving `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` blank prints verification emails
 console instead of failing, which is usually what you want locally. Set
 `REQUIRE_EMAIL_VERIFICATION=False` to skip the code step entirely during development.
 
-### 4️⃣ Run database migrations
+### 4️⃣ Migrate and seed, in one command
 ```bash
-python manage.py migrate
+python manage.py seed_all
 ```
+That runs `migrate`, then creates the baseline categories, the baseline tags and the
+super admin. Every step is idempotent, so re-running it is always safe. See
+[Seeding](#-seeding) for the individual commands and for the sample-content seed.
+
+With `DEBUG=True` and no `ADMIN_EMAIL` configured, the admin seed uses a development
+default and prints it:
+
+| | |
+| --- | --- |
+| **Email** | `admin@example.com` |
+| **Username** | `admin` (either one works — sign-in accepts email *or* username) |
+| **Password** | `MindfulAdmin!2024` |
+
+Set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` to choose your own instead. With
+`DEBUG=False` there is no default at all — see [Deploying to Render](#-deploying-to-render).
+
 > **Upgrading an existing database?** Migrations are now tracked in git (they used to be
 > gitignored). If your database already has the old schema, run
-> `python manage.py migrate --fake-initial` once, then migrate normally.
+> `python manage.py migrate --fake-initial` once, then `seed_all --no-migrate`.
 
-### 5️⃣ Seed the baseline categories
+### 5️⃣ Add sample content (optional)
 ```bash
-python manage.py seed_categories
+python manage.py seed_demo
 ```
-Categories are reference data the post editor needs. The command is idempotent.
+Five demo accounts, eight posts across every status, a series, comment threads with a
+report waiting in the moderation queue, reactions, follows and subscribers — so the
+frontend and the dashboard have something to render. The command prints the shared demo
+password, refuses to run with `DEBUG=False`, and `seed_demo --undo` removes all of it.
 
-### 6️⃣ Create an admin user and run the app
+### 6️⃣ Run the app
 ```bash
-python manage.py createsuperuser
 python manage.py runserver
 ```
 The API is then at http://localhost:8000 and the admin at http://localhost:8000/admin/.
+
+## 🌱 Seeding
+
+Two different things get called "seeding" here, and the distinction matters:
+
+- **Reference data** — categories, tags, the owner account. A real site needs these to
+  work at all, so they belong in the deploy.
+- **Sample content** — fake users, posts and comments, for looking at the frontend
+  before anybody has written anything. This must never reach a live site.
+
+| Command | What it does | Safe in production |
+| --- | --- | --- |
+| `seed_all` | `migrate`, then all three reference seeds below | ✅ every deploy |
+| `seed_categories` | The eight baseline categories the editor files posts under | ✅ |
+| `seed_tags` | ~27 starting tags, so tag pages are not empty | ✅ |
+| `seed_admin` | The super admin, from the environment, with no prompt | ✅ |
+| `seed_demo` | Demo accounts, posts, threads, reactions, subscribers | ❌ refuses unless forced |
+
+### Logins the seeds create (development)
+
+| Account | Email | Password | Role |
+| --- | --- | --- | --- |
+| Admin (`seed_admin`) | `admin@example.com` | `MindfulAdmin!2024` | super_admin |
+| Editor (`seed_demo`) | `editor@example.com` | `MindfulDemo!2024` | editor |
+| Author (`seed_demo`) | `author@example.com` | `MindfulDemo!2024` | author |
+| Designer (`seed_demo`) | `designer@example.com` | `MindfulDemo!2024` | author |
+| Contributor (`seed_demo`) | `contributor@example.com` | `MindfulDemo!2024` | contributor |
+| Reader (`seed_demo`) | `reader@example.com` | `MindfulDemo!2024` | member |
+
+Sign-in accepts the email **or** the username (`admin`, `demo-editor`, `demo-author`,
+`demo-designer`, `demo-contributor`, `demo-reader`). All of these are development
+conveniences: the admin default only applies with `DEBUG=True`, and `seed_demo` refuses
+to run with `DEBUG=False`.
+
+Everything is idempotent — matched on email, name or slug — so re-running adds what is
+missing and changes nothing else.
+
+### The admin account
+
+`createsuperuser` asks questions, which makes it unusable in the one place an admin is
+hardest to create by hand: a deploy's build step. `seed_admin` takes the same values from
+the environment instead:
+
+```bash
+ADMIN_EMAIL=you@example.com
+ADMIN_USERNAME=admin          # optional; derived from the email if omitted
+ADMIN_PASSWORD=a-long-one     # must pass Django's password validators
+```
+
+```bash
+python manage.py seed_admin
+```
+
+With nothing configured the behaviour splits on `DEBUG`, which is the difference between
+a laptop and a deploy:
+
+- **`DEBUG=True`** — falls back to `admin@example.com` / `MindfulAdmin!2024` (username
+  `admin`) and prints the credentials, so a fresh clone has a working admin login in one
+  command. Handing out a known password is the right trade for `runserver` against a
+  throwaway SQLite file; the alternative is every contributor inventing one and losing it.
+- **`DEBUG=False`** — prints "skipped" and exits **0**, so a build script can always call
+  it, and a published password can never become a live site's admin login.
+
+Other behaviour worth knowing:
+
+- An account that already exists is **not** given a new password. It is repaired instead:
+  `is_staff`, `is_superuser`, `is_verified`, un-suspended, and `role=super_admin`. That is
+  the case that actually bites — an account created before the role ladder existed, or
+  before email verification was switched on, locked out of its own site.
+- Rotating the password is deliberate: `python manage.py seed_admin --force-password`.
+- A weak password is rejected outright. This account can publish, moderate and hand out
+  roles on a site reachable from the internet.
+
+### Sample content
+
+```bash
+python manage.py seed_demo          # create
+python manage.py seed_demo --undo   # remove the demo accounts and everything they own
+```
+
+It creates five accounts — editor, two authors, contributor and member — plus posts in
+every status (published, members-only, scheduled, in review, private draft), a three-part
+series, comment threads with replies and mentions, an open moderation report, reactions,
+bookmarks, reading history, follows and newsletter subscribers. Comments, likes and
+follows go through the ORM, so the notification signals fire and the demo inbox fills up
+on its own.
+
+Addresses are all `@example.com` — a domain reserved by RFC 2606 — so a stray
+notification can never reach a real person. The shared password is printed when the
+command finishes. `seed_demo` refuses to run with `DEBUG=False` unless you pass `--force`.
 
 ## 🧪 Running Tests
 ```bash
@@ -364,6 +478,55 @@ money at the provider.
 - `riva-translate` returns Hindi when asked for Nepali. Verify any language
   before relying on it.
 
+## 🚀 Deploying to Render
+
+Render's build step is not interactive, which is why `createsuperuser` cannot be used
+there and why the seeds have to run as part of the deploy rather than by hand.
+
+`build.sh` in the repo root is the whole story. Point the service at it:
+
+| Setting | Value |
+| --- | --- |
+| **Build Command** | `./build.sh` |
+| **Start Command** | `gunicorn blog_server.wsgi:application` |
+
+It installs the requirements, runs `collectstatic`, and then runs `seed_all` — migrations,
+categories, tags and the admin account. Every step is idempotent, so it runs on every
+deploy; nothing here needs remembering after the first one.
+
+Set these as **environment variables on the service** (not in a committed file):
+
+```bash
+SECRET_KEY=...                # generate a fresh one, never reuse the dev key
+DEBUG=False                   # also switches on Secure cookies, HSTS and the https redirect
+ALLOWED_HOSTS=your-api.onrender.com
+BACKEND_URL=https://your-api.onrender.com
+FRONTEND_URL=https://your-site.example
+CORS_ALLOWED_ORIGINS=https://your-site.example
+CSRF_TRUSTED_ORIGINS=https://your-site.example
+
+ADMIN_EMAIL=you@example.com   # the seeds create this account on the first deploy
+ADMIN_PASSWORD=a-long-one
+
+CLOUDINARY_CLOUD_NAME=...     # Render's disk is ephemeral — uploads must go here
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+CACHE_DIR=/tmp/blog-cache     # the throttle cache needs a writable path
+```
+
+Then open `https://your-api.onrender.com/admin/` and sign in as `ADMIN_EMAIL`.
+
+**Notes**
+
+- The build runs against your production database, so it must be reachable at build
+  time. On a plan that offers a **Pre-Deploy Command**, move `python manage.py seed_all`
+  there and drop it from `build.sh` — that is the more correct place for it.
+- `seed_demo` is not called by `build.sh` and refuses to run with `DEBUG=False`. Sample
+  content does not belong on a live site.
+- Settings read `DB_ENGINE`/`DB_NAME`/`DB_USER`/… — not `DATABASE_URL`. If you attach a
+  Render Postgres, map its fields to those variables and add a Postgres driver
+  (`psycopg2-binary`) to `requirements.txt`; only MySQL (`PyMySQL`) ships today.
+
 ## 🚀 Deploying to PythonAnywhere (Free Tier)
 1. **Create a PythonAnywhere Account**  
    Sign up for a free account at [pythonanywhere.com](https://www.pythonanywhere.com).
@@ -589,7 +752,7 @@ To ensure the security of your Mindful Blog Backend deployment:
 - **Database**: Restrict access to the database server and use environment-specific configurations.  
 - **Image Uploads**: Validate and sanitize all user-uploaded content (e.g., via Cloudinary).  
 - **API Security**: Use Django REST Framework’s throttling and input validation to prevent abuse.  
-- **Session Security**: Set `SESSION_COOKIE_SECURE=True` and `CSRF_COOKIE_SECURE=True` in production.
+- **Session Security**: Handled by `DEBUG=False` alone — secure cookies, `SameSite=None`, the https redirect and HSTS all switch on with it, and there is no environment override that can turn them back off.
 
 ## 📜 License
 Distributed under the MIT License. See `LICENSE` for details.

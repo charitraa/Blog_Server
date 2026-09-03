@@ -369,7 +369,7 @@ if EMAIL_HOST_USER and _configured_from.endswith(('.local', '.invalid', '.exampl
 else:
     DEFAULT_FROM_EMAIL = _configured_from or EMAIL_HOST_USER or 'no-reply@mindfulblog.local'
 
-SITE_NAME = config('SITE_NAME', default='Mindful Blog')
+SITE_NAME = config('SITE_NAME', default='Marginalia')
 
 # New accounts must confirm the emailed code before they can log in.
 REQUIRE_EMAIL_VERIFICATION = config('REQUIRE_EMAIL_VERIFICATION', default=True, cast=bool)
@@ -395,27 +395,52 @@ CSRF_TRUSTED_ORIGINS = config(
     cast=Csv(),
 )
 
-# Cookies may only carry the Secure flag over HTTPS, so keep it off in development.
-COOKIE_SECURE = config('COOKIE_SECURE', default=not DEBUG, cast=bool)
-COOKIE_SAMESITE = config('COOKIE_SAMESITE', default='None' if COOKIE_SECURE else 'Lax')
+# One switch decides everything transport-related: with DEBUG off the site is
+# assumed to be behind HTTPS, which is what a deploy actually looks like. Both
+# the cookie flags and the redirect/HSTS block below read from it, so the two
+# can never disagree — secure cookies on a site still served over http would
+# silently stop working, and plain cookies on an https site would leak.
+HTTPS_ONLY = not DEBUG
+
+# Deliberately not read from the environment. Every deployment wants these on,
+# and the only thing a COOKIE_SECURE override could express is "send my session
+# and refresh cookies in the clear" — a mistake worth making impossible rather
+# than documenting. Local development gets the http-compatible values because
+# DEBUG is on there, not because anything was configured.
+COOKIE_SECURE = HTTPS_ONLY
+# A cookie is only sent on a cross-site request when it is SameSite=None, and
+# browsers reject SameSite=None unless it is also Secure. The SPA is served
+# from a different origin than this API in production, so that pairing is the
+# only combination that works there. Locally both sides are http, where None
+# would be dropped, and Lax is correct for a same-site dev setup anyway.
+COOKIE_SAMESITE = 'None' if HTTPS_ONLY else 'Lax'
 
 CSRF_COOKIE_SECURE = COOKIE_SECURE
 SESSION_COOKIE_SECURE = COOKIE_SECURE
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = COOKIE_SAMESITE
 CSRF_COOKIE_SAMESITE = COOKIE_SAMESITE
+# Left readable by script on purpose: the SPA has to pull the token out of the
+# cookie to put it in the X-CSRFToken header. Marking it httpOnly would break
+# every session-authenticated write without adding protection, since CSRF
+# defence rests on the attacker's origin not being able to read the value.
+CSRF_COOKIE_HTTPONLY = False
 SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = 'same-origin'
 X_FRAME_OPTIONS = 'DENY'
 
-if not DEBUG:
-    SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
-    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
+if HTTPS_ONLY:
+    # Render, and every other managed host, terminates TLS at its proxy and
+    # forwards plain http. Without this header Django sees an insecure request,
+    # SECURE_SSL_REDIRECT bounces it to https, and the proxy forwards it back —
+    # a redirect loop. It has to be set before the redirect it feeds.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # ---------------------------------------------------------------------------
