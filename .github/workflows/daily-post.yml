@@ -22,7 +22,7 @@ on:
         options: [published, draft]
         default: published
 
-# Two runs writing to posted.json at once would fight over the same commit.
+# Two posts landing at once would be two posts for the day.
 concurrency:
   group: daily-post
   cancel-in-progress: false
@@ -30,8 +30,12 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
+    # Read-only. This job deliberately never pushes: a push to this repo
+    # redeploys Render, and the blog's SQLite database lives on a disk that a
+    # redeploy wipes. What has already been posted is read back from the blog
+    # itself (see Blog.my_posts) rather than tracked in a committed file.
     permissions:
-      contents: write   # only to commit automation/posted.json back
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +52,7 @@ jobs:
           BLOG_EMAIL: ${{ secrets.BLOG_EMAIL }}
           BLOG_PASSWORD: ${{ secrets.BLOG_PASSWORD }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           # Neither of these is sensitive, so they belong on the Variables tab
           # -- but `vars.` and `secrets.` are separate stores and a name added
           # to the wrong one reads as empty rather than as an error. Accept
@@ -65,18 +70,3 @@ jobs:
           if [ "$INPUT_DRY_RUN" = 'true' ]; then args+=(--dry-run); fi
           if [ -n "$INPUT_TOPIC" ];        then args+=(--topic "$INPUT_TOPIC"); fi
           python automation/daily_post.py "${args[@]}"
-
-      - name: Record what was posted
-        if: success() && !inputs.dry_run
-        run: |
-          # Nothing to do when the topic came from the workflow input and the
-          # file did not change.
-          if git diff --quiet automation/posted.json; then
-            echo 'No state change to commit.'
-            exit 0
-          fi
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add automation/posted.json
-          git commit -m 'chore(automation): record daily post [skip ci]'
-          git push

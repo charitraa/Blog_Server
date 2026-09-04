@@ -24,14 +24,12 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 HERE = Path(__file__).resolve().parent
 TOPICS_FILE = Path(os.environ.get('TOPICS_FILE', HERE / 'topics.txt'))
-STATE_FILE = Path(os.environ.get('STATE_FILE', HERE / 'posted.json'))
 
 # The blog sanitises HTML server-side and drops anything not on its allowlist
 # (apps/post/utils.py). Asking for the allowed subset up front means the post
@@ -46,6 +44,10 @@ ALLOWED_HTML = 'p, h2, h3, ul, ol, li, strong, em, blockquote, pre, code, a, hr'
 # than sharing the API one.
 TIMEOUT = int(os.environ.get('HTTP_TIMEOUT', 120))
 AI_TIMEOUT = int(os.environ.get('AI_TIMEOUT', 900))
+
+# The blog rejects a cover over MAX_IMAGE_UPLOAD_SIZE, 5MB by default
+# (blog_server/validators.py), and a rejected upload fails the whole post.
+MAX_COVER_BYTES = int(os.environ.get('MAX_COVER_BYTES', 5 * 1024 * 1024))
 
 
 class Failed(RuntimeError):
@@ -122,9 +124,16 @@ class Blog:
             raise Failed(f'Login succeeded but returned no access token: {body}')
         return body.get('user', {})
 
-    def my_titles(self):
-        """Every title this account has already used, drafts included."""
-        titles, page = set(), 1
+    def my_posts(self):
+        """
+        Everything this account has written, drafts included.
+
+        This is the job's only memory. It used to be a file committed back to
+        the repo after every run — but a push redeploys Render, and this blog's
+        SQLite database lives on a disk that a redeploy wipes. The blog already
+        knows what it published, so it is asked instead of being told.
+        """
+        posts, page = [], 1
         while page <= 20:  # a guard, not a real limit: 50/page is 1000 posts
             response = self.http.get(
                 self.url('/api/posts/mine/'),
@@ -136,11 +145,15 @@ class Blog:
                 raise Failed(f'Could not list existing posts: {response.text[:200]}')
             body = response.json()
             for post in body.get('results', []):
-                titles.add(post.get('title', '').strip().lower())
+                posts.append({
+                    'title': (post.get('title') or '').strip(),
+                    'subtitle': (post.get('subtitle') or '').strip(),
+                    'tags': [tag.get('name', '') for tag in (post.get('tags') or [])],
+                })
             if not body.get('next'):
                 break
             page += 1
-        return titles
+        return posts
 
     def categories(self):
         response = self.http.get(self.url('/api/categories/'), timeout=TIMEOUT)
@@ -150,13 +163,35 @@ class Blog:
         rows = body if isinstance(body, list) else body.get('results', [])
         return [{'slug': row['slug'], 'name': row['name']} for row in rows if row.get('slug')]
 
-    def create_post(self, payload):
-        response = self.http.post(
-            self.url('/api/posts/'),
-            json=payload,
-            headers=self.headers(),
-            timeout=TIMEOUT,
-        )
+    def create_post(self, payload, cover=None):
+        """
+        Create the post, with an optional cover image.
+
+        `cover_image` is a Django ImageField, so a post carrying one cannot be
+        sent as JSON — it has to be multipart. The write serializer is built
+        for that: TagListField splits a comma-separated string, and
+        CategoryRelatedField reads a bare slug, so the same values survive the
+        trip as form fields.
+        """
+        if cover is None:
+            response = self.http.post(
+                self.url('/api/posts/'),
+                json=payload,
+                headers=self.headers(),
+                timeout=TIMEOUT,
+            )
+        else:
+            form = dict(payload)
+            form['tags'] = ','.join(payload.get('tags') or [])
+            if form.get('category') is None:
+                form.pop('category')
+            response = self.http.post(
+                self.url('/api/posts/'),
+                data=form,
+                files={'cover_image': ('cover.jpg', cover, 'image/jpeg')},
+                headers=self.headers(),
+                timeout=TIMEOUT,
+            )
         if response.status_code == 429:
             raise Failed('Rate limited by the blog (THROTTLE_WRITE). Try again later.')
         if response.status_code >= 400:
@@ -289,6 +324,110 @@ def extract_json(raw):
 
 
 # ---------------------------------------------------------------------------
+# Cover images
+# ---------------------------------------------------------------------------
+
+class Unsplash:
+    """
+    One free-to-use cover photo per post.
+
+    Unsplash rather than an image search: its licence permits commercial reuse,
+    which a page of Google Images results does not. A daily job accumulates
+    whatever it is pointed at, so pointing it at other people's copyrighted
+    photographs would quietly build a liability.
+
+    Two obligations come with the API and both are honoured here — crediting
+    the photographer, and pinging `download_location` when a photo is actually
+    used. The ping is what Unsplash counts downloads with; skipping it is the
+    usual reason an application key gets revoked.
+    """
+
+    API = 'https://api.unsplash.com'
+
+    def __init__(self, access_key):
+        self.access_key = access_key
+        self.http = requests.Session()
+        self.http.headers['Authorization'] = f'Client-ID {access_key}'
+
+    def find(self, queries):
+        """The first usable photo across these queries, best query first."""
+        for query in queries:
+            if not query:
+                continue
+            try:
+                response = self.http.get(
+                    f'{self.API}/search/photos',
+                    params={'query': query, 'per_page': 5,
+                            'orientation': 'landscape', 'content_filter': 'high'},
+                    timeout=TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                print(f'  unsplash unreachable ({exc}); continuing without a cover',
+                      file=sys.stderr)
+                return None
+            if response.status_code == 401:
+                print('  UNSPLASH_ACCESS_KEY was rejected; continuing without a cover',
+                      file=sys.stderr)
+                return None
+            if response.status_code == 403:
+                # 50 requests an hour on the demo tier.
+                print('  unsplash rate limit reached; continuing without a cover',
+                      file=sys.stderr)
+                return None
+            if response.status_code >= 400:
+                continue
+            for photo in response.json().get('results', []):
+                url = (photo.get('urls') or {}).get('regular')
+                if url:
+                    user = photo.get('user') or {}
+                    return {
+                        'query': query,
+                        'url': url,
+                        'download_location': (photo.get('links') or {}).get('download_location'),
+                        'author': user.get('name') or user.get('username') or 'a photographer',
+                        'author_url': (user.get('links') or {}).get('html', 'https://unsplash.com'),
+                        'alt': (photo.get('alt_description') or '').strip(),
+                    }
+        return None
+
+    def fetch(self, photo):
+        """The image bytes, or None if anything about them is unusable."""
+        try:
+            response = self.http.get(photo['url'], timeout=TIMEOUT)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            print(f'  could not download the cover ({exc}); continuing without one',
+                  file=sys.stderr)
+            return None
+
+        data = response.content
+        # The blog refuses anything over MAX_IMAGE_UPLOAD_SIZE (5MB by
+        # default). `regular` is ~1080px wide and lands well inside that, but
+        # the check is cheap and a rejected upload would fail the whole post.
+        if len(data) > MAX_COVER_BYTES:
+            print(f'  cover is {len(data) // 1024}KB, over the blog\'s limit; skipping',
+                  file=sys.stderr)
+            return None
+
+        # Counting the download is a condition of using the API, and it must
+        # happen only when the photo is really used. A failure here is not
+        # worth losing the post over.
+        if photo.get('download_location'):
+            try:
+                self.http.get(photo['download_location'], timeout=TIMEOUT)
+            except requests.RequestException:
+                pass
+        return data
+
+
+def credit(photo):
+    """The attribution line Unsplash asks for, as the blog's allowed HTML."""
+    return (f'<p><em>Cover photo by '
+            f'<a href="{photo["author_url"]}">{photo["author"]}</a> on '
+            f'<a href="https://unsplash.com">Unsplash</a>.</em></p>')
+
+
+# ---------------------------------------------------------------------------
 # Topic selection
 # ---------------------------------------------------------------------------
 
@@ -303,22 +442,61 @@ def read_topics(path):
     return lines
 
 
-def read_state(path):
-    if not path.exists():
-        return {'posts': []}
-    try:
-        state = json.loads(path.read_text(encoding='utf-8'))
-    except ValueError:
-        return {'posts': []}
-    state.setdefault('posts', [])
-    return state
+# Words that say nothing about what a post is about. Kept deliberately short:
+# the topics are distinctive enough that filler is all worth removing, and an
+# over-eager list would start discarding real subject words.
+STOPWORDS = frozenset("""
+a an and are as at be been but by can do does for from has have how i if in
+into is it its me my no not of on one or should than that the their them then
+there these they this to up use used using was what when where which while who
+why will with without you your actually best every make makes need needs real
+really thing things way ways
+""".split())
 
 
-def choose_topic(topics, state, recent_titles, writer, strict):
-    used = {entry.get('topic', '').strip().lower() for entry in state['posts']}
+def keywords(text):
+    """The distinctive words of a phrase, crudely singularised."""
+    words = set()
+    for word in re.findall(r'[a-z0-9+#]+', (text or '').lower()):
+        if len(word) < 3 or word in STOPWORDS:
+            continue
+        # "indexes"/"index" and "reviews"/"review" have to meet. Not a stemmer,
+        # and does not need to be: it only has to make two phrasings of one
+        # subject overlap.
+        if word.endswith('es') and len(word) > 4:
+            word = word[:-2]
+        elif word.endswith('s') and len(word) > 3:
+            word = word[:-1]
+        words.add(word)
+    return words
+
+
+def covered_by(topic, posts, threshold=0.6):
+    """
+    The existing post that already covers this topic, or None.
+
+    A topic and the title it becomes are never identical — "What a database
+    index actually costs you on every write" was published as "Database
+    indexes: the hidden cost on every write" — so this compares the words that
+    carry the subject rather than the strings.
+    """
+    wanted = keywords(topic)
+    if not wanted:
+        return None
+    for post in posts:
+        text = ' '.join([post.get('title', ''), post.get('subtitle', '')]
+                        + list(post.get('tags') or []))
+        if len(wanted & keywords(text)) / len(wanted) >= threshold:
+            return post
+    return None
+
+
+def choose_topic(topics, posts, recent_titles, writer, strict):
     for topic in topics:
-        if topic.strip().lower() not in used:
+        match = covered_by(topic, posts)
+        if match is None:
             return topic, 'queue'
+        print(f'  skipping "{topic[:55]}" — covered by "{match["title"]}"')
 
     if strict:
         raise Failed(
@@ -497,16 +675,16 @@ def main():
         env('NVIDIA_MODEL', 'openai/gpt-oss-20b'),
     )
 
-    titles = blog.my_titles()
+    posts = blog.my_posts()
+    titles = {post['title'].strip().lower() for post in posts}
     categories = blog.categories()
-    state = read_state(STATE_FILE)
-    print(f'   {len(titles)} existing post(s), {len(categories)} categories')
+    print(f'   {len(posts)} existing post(s), {len(categories)} categories')
 
     if args.topic:
         topic, source = args.topic, 'argument'
     else:
         topic, source = choose_topic(
-            read_topics(TOPICS_FILE), state, titles, writer,
+            read_topics(TOPICS_FILE), posts, titles, writer,
             strict=env('STRICT_TOPICS', '') not in ('', '0', 'false', 'False'),
         )
     print(f'-> topic ({source}): {topic}')
@@ -519,8 +697,35 @@ def main():
     if article['title'].strip().lower() in titles:
         raise Failed(f'A post titled "{article["title"]}" already exists; skipping.')
 
+    # A cover is a nice-to-have: every failure below degrades to no image
+    # rather than costing the day's post.
+    cover, photo = None, None
+    unsplash_key = env('UNSPLASH_ACCESS_KEY')
+    if unsplash_key:
+        print('-> finding a cover photo')
+        # Tags describe the subject in the words a photo library indexes by;
+        # the title rarely does. "Idempotency keys, and the payment bug they
+        # prevent" finds nothing, "payments" finds plenty.
+        unsplash = Unsplash(unsplash_key)
+        photo = unsplash.find(article['tags'] + [topic])
+        # Downloading pings Unsplash's download counter, which is meant to
+        # record a photo actually being used. A dry run uses nothing, so it
+        # reports what it found and stops there.
+        if photo and not args.dry_run:
+            cover = unsplash.fetch(photo)
+        elif photo:
+            print(f'   would use a photo by {photo["author"]} '
+                  f'(searched "{photo["query"]}")')
+        if cover:
+            print(f'   photo by {photo["author"]} (searched "{photo["query"]}")')
+            article['content'] += '\n' + credit(photo)
+        else:
+            print('   no usable cover; publishing without one')
+    else:
+        print('-> no UNSPLASH_ACCESS_KEY set; publishing without a cover')
+
     if args.dry_run:
-        summarise([f'### Dry run — nothing published',
+        summarise(['### Dry run — nothing published',
                    f'**Topic:** {topic}',
                    f'**Title:** {article["title"]}',
                    f'**Words:** {words}', '', '<details><summary>Body</summary>', '',
@@ -529,28 +734,17 @@ def main():
 
     payload = dict(article, status=args.status)
     print(f'-> publishing as {args.status}')
-    created = blog.create_post(payload)
+    created = blog.create_post(payload, cover=cover)
 
     slug = created.get('slug', '')
     site = env('BLOG_SITE_URL', '').rstrip('/')
     link = f'{site}/post/{slug}' if site else f'{blog.base}/api/posts/{slug}/'
 
-    state['posts'].append({
-        'date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-        'topic': topic,
-        'title': created.get('title', article['title']),
-        'slug': slug,
-        'id': created.get('id'),
-        'words': words,
-        'source': source,
-    })
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + '\n',
-                          encoding='utf-8')
-
     summarise([f'### Published: {created.get("title")}',
                f'- **Topic:** {topic}',
                f'- **Words:** {words}',
                f'- **Tags:** {", ".join(article["tags"]) or "none"}',
+               '- **Cover:** ' + (f'by {photo["author"]} on Unsplash' if cover else 'none'),
                f'- **Link:** {link}'])
     return 0
 

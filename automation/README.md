@@ -50,6 +50,7 @@ Secrets (hidden after saving):
 | `BLOG_EMAIL` | the posting account's email |
 | `BLOG_PASSWORD` | the password from step 1 |
 | `NVIDIA_API_KEY` | the `nvapi-…` key, same one Render uses |
+| `UNSPLASH_ACCESS_KEY` | optional — cover photos; omit and posts publish without one |
 
 Variables — **the *Variables* tab, next to *Secrets*, not the same page**:
 
@@ -80,10 +81,17 @@ Then run it once for real, and leave the schedule to it.
 
 ## How it decides what to write
 
-`topics.txt` is a plain list, top to bottom. The job takes the first line that
-does not already appear in `posted.json`, which is committed back to the repo
-after each successful run — that file is the queue's memory, so a run that
-publishes but fails to push would repeat itself the next day.
+`topics.txt` is a plain list, top to bottom. The job takes the first line it
+has not already covered.
+
+**It keeps no state file and never pushes to this repo.** It used to commit a
+`posted.json` back after each run, which meant a push a day — and a push
+redeploys Render, where this blog's SQLite database sits on a disk that a
+redeploy wipes. So the memory lives in the blog instead: `my_posts()` reads
+back every title, subtitle and tag the account has published, and `covered_by()`
+matches those against the topic list on significant words. "What a database
+index actually costs you on every write" and the post it became, "Database
+indexes: the hidden cost on every write", share enough of them to match.
 
 When the list runs out the job asks the model for a fresh topic rather than
 stopping, giving it your recent titles so it doesn't circle back. Set
@@ -123,6 +131,32 @@ These models also write short — 450 to 600 words against a brief asking for
 `MIN_WORDS` (700) is asked for once more and the longer of the two is
 published.
 
+## Cover images
+
+With `UNSPLASH_ACCESS_KEY` set, each post gets a free-to-use cover photo.
+Without it, posts publish fine with no image — every step of the lookup
+degrades to "no cover" rather than failing the run.
+
+Unsplash rather than an image search, because its licence permits commercial
+reuse and a page of Google Images results does not. A job that runs every day
+accumulates whatever you point it at, so pointing it at other people's
+copyrighted photographs would build a liability quietly and daily.
+
+The search uses the article's **tags**, not its title — photo libraries are
+indexed by subject, so "payments" finds plenty where "Idempotency keys, and the
+payment bug they prevent" finds nothing. Two of Unsplash's API conditions are
+met in code: the photographer is credited in a line appended to the post, and
+`download_location` is pinged when a photo is actually used. That ping is how
+Unsplash counts downloads, and skipping it is the usual way a key gets revoked.
+
+Get a key by registering an application at
+<https://unsplash.com/developers>. The demo tier allows 50 requests an hour,
+against one post a day.
+
+A post carrying an image is sent as `multipart/form-data` rather than JSON,
+because `cover_image` is a Django `ImageField`. The blog caps covers at 5MB
+(`MAX_IMAGE_UPLOAD_SIZE`) and accepts JPEG, PNG, GIF or WEBP.
+
 ## Running it yourself
 
 ```bash
@@ -140,7 +174,7 @@ python automation/daily_post.py --status draft     # publish nowhere public
 
 Other knobs, all environment variables: `NVIDIA_MODEL`, `MIN_WORDS`,
 `STRICT_TOPICS`, `REASONING_EFFORT`, `HTTP_TIMEOUT`, `AI_TIMEOUT`,
-`TOPICS_FILE`, `STATE_FILE`.
+`MAX_COVER_BYTES`, `TOPICS_FILE`.
 
 ## When it fails
 

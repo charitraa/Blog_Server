@@ -1,6 +1,9 @@
-# One topic per line. The daily job takes the first line that has not been
-# used yet (automation/posted.json records what has), writes a post about it
-# and publishes it.
+# One topic per line. The daily job takes the first line it has not already
+# covered, writes a post about it and publishes it.
+#
+# Nothing here is ticked off in a file. The job asks the blog what it has
+# published and matches those titles back against this list, so the queue
+# survives without the job ever writing to the repo.
 #
 # Lines starting with '#' and blank lines are ignored. Edit freely: adding a
 # topic anywhere in the file is enough, order is top to bottom.
