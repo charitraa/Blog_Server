@@ -348,9 +348,29 @@ EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='').strip()
 # pasted straight from the Google page works instead of failing as bad credentials.
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='').replace(' ', '').strip()
 
+# Brevo issues two different credentials and they are not interchangeable: an
+# API key (`xkeysib-...`) for api.brevo.com, and an SMTP key (`xsmtpsib-...`)
+# for its mail relay. This backend calls the API, so an SMTP key pasted into
+# BREVO_API_KEY authenticates against nothing -- every send comes back 401
+# "Key not found", and because the callers treat a mail failure as non-fatal,
+# the user is told a code was sent and no code ever arrives.
+#
+# Detected here rather than at send time: an SMTP key means "Brevo's API is not
+# configured", so the choice below falls through to SMTP instead of selecting a
+# backend that cannot possibly work.
+BREVO_API_KEY_IS_SMTP = BREVO_API_KEY.startswith('xsmtpsib-')
+if BREVO_API_KEY_IS_SMTP:
+    import warnings
+    warnings.warn(
+        'BREVO_API_KEY holds an SMTP key (xsmtpsib-...), which the Brevo API '
+        'rejects. Use an API key (xkeysib-...) from Brevo > SMTP & API > API '
+        'Keys, or leave BREVO_API_KEY empty to send over SMTP instead.',
+        RuntimeWarning,
+    )
+
 # Brevo first, SMTP second, console last. The console fallback means a fresh
 # checkout with no credentials still runs and shows you the emails.
-if BREVO_API_KEY:
+if BREVO_API_KEY and not BREVO_API_KEY_IS_SMTP:
     EMAIL_BACKEND = 'apps.newsletter.backends.BrevoEmailBackend'
 elif EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

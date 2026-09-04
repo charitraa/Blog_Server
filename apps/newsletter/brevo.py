@@ -30,8 +30,26 @@ class BrevoError(Exception):
     """Brevo refused or could not be reached."""
 
 
+# Brevo's SMTP keys and API keys look alike and are not interchangeable. This
+# module talks to the API, so a key carrying this prefix belongs to the mail
+# relay and will be rejected with 401 "Key not found".
+SMTP_KEY_PREFIX = 'xsmtpsib-'
+
+
 def is_configured():
-    return bool(settings.BREVO_API_KEY)
+    """
+    Whether this deployment can talk to the Brevo API.
+
+    The key is read here rather than from a flag computed once at settings
+    import: a derived setting would go stale under `override_settings`, and
+    tests that swap the key in would be reasoning about the real one.
+
+    A key the API will reject counts as not configured. It is worse than no key
+    at all, because it turns a clear "the newsletter is not set up" into a 401
+    at send time, long after anyone would think to look.
+    """
+    key = settings.BREVO_API_KEY or ''
+    return bool(key) and not key.startswith(SMTP_KEY_PREFIX)
 
 
 def _headers():

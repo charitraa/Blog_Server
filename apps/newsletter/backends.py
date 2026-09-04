@@ -48,9 +48,14 @@ class BrevoEmailBackend(BaseEmailBackend):
                     html = content
                     break
 
+            # Deliberately NOT message.from_email. Brevo only accepts a
+            # sender address that has been verified in the account, and
+            # DEFAULT_FROM_EMAIL is usually whatever the SMTP fallback would
+            # send as -- a different address entirely. Passing that through
+            # earns a 400 on every send, so the verified sender configured for
+            # Brevo wins, and `send_transactional` fills it in from
+            # BREVO_SENDER_EMAIL when it is None.
             sender = None
-            if message.from_email:
-                sender = {'email': message.from_email}
 
             for recipient in message.recipients():
                 try:
