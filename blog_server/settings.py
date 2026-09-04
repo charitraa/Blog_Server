@@ -494,7 +494,11 @@ NVIDIA_BASE_URL = config('NVIDIA_BASE_URL', default='https://integrate.api.nvidi
 NVIDIA_API_KEY = config('NVIDIA_API_KEY', default='')
 
 # Main model: returns clean answers with its reasoning in a separate field.
-NVIDIA_MODEL = config('NVIDIA_MODEL', default='openai/gpt-oss-120b')
+# NVIDIA retires models on a schedule and the endpoint then answers 410 Gone,
+# so this default is a starting point rather than something to rely on --
+# gpt-oss-120b, which used to be named here, went end of life on 2026-09-03.
+# `GET {NVIDIA_BASE_URL}/models` lists what the key can currently reach.
+NVIDIA_MODEL = config('NVIDIA_MODEL', default='openai/gpt-oss-20b')
 # Smaller sibling for short, cheap tasks (tags, proofreading, social posts).
 NVIDIA_FAST_MODEL = config('NVIDIA_FAST_MODEL', default='openai/gpt-oss-20b')
 # Purpose-built models beat the general one at their own job.

@@ -1,0 +1,31 @@
+# One topic per line. The daily job takes the first line that has not been
+# used yet (automation/posted.json records what has), writes a post about it
+# and publishes it.
+#
+# Lines starting with '#' and blank lines are ignored. Edit freely: adding a
+# topic anywhere in the file is enough, order is top to bottom.
+#
+# When every topic here has been used the job asks the model for a fresh one
+# in the spirit of the recent posts, so the blog does not stop. Set
+# STRICT_TOPICS=1 in the workflow if you would rather it stop and wait for you.
+
+Why the best code review comment is a question, not a correction
+What a database index actually costs you on every write
+Reading a stack trace from the bottom up
+The difference between authentication and authorisation, with examples
+Why your API should return the object it just created
+Soft deletes: the cost of never really deleting anything
+Idempotency keys, and the payment bug they prevent
+What "eventually consistent" means for the user staring at a spinner
+The case against clever one-liners
+How pagination breaks when rows are inserted mid-scroll
+Timezones: storing UTC is only half the job
+Why retries without backoff make an outage worse
+The unreasonable effectiveness of a boring changelog
+N+1 queries, and how ORMs hide them from you
+What a good error message owes the person reading it
+Feature flags as a deployment strategy, not a toggle
+Caching is easy; invalidation is the whole job
+Why migrations should be backwards compatible for one release
+The quiet cost of a dependency you added in five minutes
+Writing tests that fail for the right reason
