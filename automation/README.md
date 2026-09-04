@@ -51,12 +51,19 @@ Secrets (hidden after saving):
 | `BLOG_PASSWORD` | the password from step 1 |
 | `NVIDIA_API_KEY` | the `nvapi-…` key, same one Render uses |
 
-Variables (visible, on the *Variables* tab):
+Variables — **the *Variables* tab, next to *Secrets*, not the same page**:
 
 | Name | Value |
 | --- | --- |
 | `BLOG_SITE_URL` | `https://marginalia.charitrashrestha.com.np` |
 | `NVIDIA_MODEL` | `openai/gpt-oss-20b` |
+
+`vars.` and `secrets.` are separate stores. A name added to the wrong tab is
+not an error — the workflow simply reads an empty string, and the job fails
+somewhere further along with an unrelated-looking message. The workflow reads
+these two from either tab for that reason, but the Variables tab is the right
+home: neither is sensitive, and a secret is masked as `***` in the logs, which
+makes a wrong model name much harder to spot.
 
 `BLOG_SITE_URL` only builds the link in the run summary. `NVIDIA_MODEL` is
 optional — see *Choosing a model* below for why you should still set it.

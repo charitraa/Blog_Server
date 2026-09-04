@@ -57,7 +57,18 @@ class Failed(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def env(name, default=None, required=False):
-    value = os.environ.get(name, default)
+    """
+    An environment variable, treating empty as absent.
+
+    That distinction matters here. A workflow step lists every variable it
+    passes, so an unset repository variable still arrives — as an empty
+    string. `os.environ.get(name, default)` would hand back that empty string
+    and skip the default, which is how an unset NVIDIA_MODEL once reached the
+    provider as `"model": ""` and came back "model field is required".
+    """
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        value = default
     if required and not value:
         raise Failed(
             f'{name} is not set. In GitHub Actions add it under '
@@ -192,10 +203,15 @@ class Writer:
             json=dict(payload, **self.knobs),
             timeout=AI_TIMEOUT,
         )
-        if response.status_code == 400 and self.knobs:
+        if (response.status_code == 400 and self.knobs
+                and any(knob in response.text for knob in self.knobs)):
             # A model that does not know the knob rejects the whole request.
             # Losing the knob costs speed, not correctness, so drop it and
             # carry on rather than failing the day's post over it.
+            #
+            # The error has to actually name the knob. Retrying on any 400 at
+            # all made an unrelated rejection ("model field is required") look
+            # like a knob problem, and reported the wrong cause in the log.
             print(f'  {self.model} rejected {list(self.knobs)}; retrying without',
                   file=sys.stderr)
             self.knobs = {}

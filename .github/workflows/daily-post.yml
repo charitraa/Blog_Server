@@ -47,9 +47,13 @@ jobs:
           BLOG_API_BASE: ${{ secrets.BLOG_API_BASE }}
           BLOG_EMAIL: ${{ secrets.BLOG_EMAIL }}
           BLOG_PASSWORD: ${{ secrets.BLOG_PASSWORD }}
-          BLOG_SITE_URL: ${{ vars.BLOG_SITE_URL }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          NVIDIA_MODEL: ${{ vars.NVIDIA_MODEL }}
+          # Neither of these is sensitive, so they belong on the Variables tab
+          # -- but `vars.` and `secrets.` are separate stores and a name added
+          # to the wrong one reads as empty rather than as an error. Accept
+          # both, so whichever tab they were typed into, the job finds them.
+          BLOG_SITE_URL: ${{ vars.BLOG_SITE_URL || secrets.BLOG_SITE_URL }}
+          NVIDIA_MODEL: ${{ vars.NVIDIA_MODEL || secrets.NVIDIA_MODEL }}
           # Dispatch inputs reach the script through the environment, never
           # through the command line: a topic is free text, and interpolating
           # it into `run:` would let it run as shell.
