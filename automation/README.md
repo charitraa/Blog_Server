@@ -8,6 +8,14 @@ blog itself is on Render's free tier, which has no cron and no shell.
 Nothing about the script is specific to Actions. The same command works from
 your own machine or from a cron entry.
 
+The posts it creates are read on the React frontend, which is a separate
+repository — <https://github.com/charitraa/Mindful_Blog>, checked out locally
+at `~/Desktop/Mindful_Blog`, deployed to
+<https://marginalia.charitrashrestha.com.np>. Nothing here touches it: a post
+reaches the site through the API, and the frontend renders it at
+`/post/<slug>`, which is the route `BLOG_SITE_URL` builds the summary link
+against.
+
 ---
 
 ## 1. Give the posting account a password

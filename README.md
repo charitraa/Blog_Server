@@ -7,6 +7,16 @@ author profiles and dashboard statistics. It is built with Django and Django RES
 Framework and is consumed by the [Mindful Blog](https://github.com/charitraa/Mindful_Blog)
 React frontend.
 
+| | |
+| --- | --- |
+| Live site | <https://marginalia.charitrashrestha.com.np> |
+| Frontend repo | <https://github.com/charitraa/marginalia> |
+
+The frontend is deployed separately on Vercel and reaches this API through
+`VITE_API_BASE_URL`. Run the two together locally by leaving that variable
+empty: `vite.config.ts` then proxies `/api` and `/media` to
+`VITE_DEV_API_TARGET`, which defaults to `http://127.0.0.1:8000`.
+
 ## 🛠️ Tech Stack
 - **Framework**: Django 5.2 + Django REST Framework
 - **Database**: SQLite by default; MySQL/PostgreSQL via `DB_ENGINE` and friends
