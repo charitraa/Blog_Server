@@ -17,6 +17,15 @@
       "id": "4250c92c-0292-4de2-a655-b1e48798c663",
       "words": 795,
       "source": "queue"
+    },
+    {
+      "date": "2026-09-04",
+      "topic": "Reading a stack trace from the bottom up",
+      "title": "Debugging from the bottom up",
+      "slug": "debugging-from-the-bottom-up",
+      "id": "55173079-8a4b-4e5c-bcc2-3c1fdcdda856",
+      "words": 782,
+      "source": "queue"
     }
   ]
 }
