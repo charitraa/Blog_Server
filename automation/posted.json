@@ -1,1 +1,13 @@
-{"posts": []}
+{
+  "posts": [
+    {
+      "date": "2026-09-04",
+      "topic": "Why the best code review comment is a question, not a correction",
+      "title": "Question over correction in code reviews",
+      "slug": "question-over-correction-in-code-reviews",
+      "id": "143567c8-39b3-44f9-ac5d-4bf91b58b5ea",
+      "words": 734,
+      "source": "queue"
+    }
+  ]
+}
