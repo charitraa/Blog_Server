@@ -291,6 +291,57 @@ class PostWriteTests(APITestCase):
         response = self.client.get('/api/posts/trash/')
         self.assertEqual([row['slug'] for row in response.data['results']], [mine.slug])
 
+    def test_a_deleted_post_disappears_from_the_authors_own_list(self):
+        # The author's own list is the one that shows drafts, so it is also the
+        # one where a trashed post can hide in plain sight: it carries no field
+        # saying it is deleted, and the dashboard renders it as live.
+        live = make_post(self.author, title='Still here')
+        trashed = make_post(self.author, title='Thrown away')
+        trashed.soft_delete()
+
+        self.client.force_authenticate(self.author)
+        response = self.client.get('/api/posts/mine/')
+        slugs = [row['slug'] for row in response.data['results']]
+        self.assertIn(live.slug, slugs)
+        self.assertNotIn(trashed.slug, slugs)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_a_deleted_post_is_not_counted_by_its_category_or_tags(self):
+        tag = Tag.objects.create(name='python')
+        post = make_post(self.author, category=self.category)
+        post.tags.add(tag)
+
+        self.client.force_authenticate(None)
+        listed = self.client.get('/api/categories/').data
+        self.assertEqual([row['post_count'] for row in listed], [1])
+
+        post.soft_delete()
+
+        # A count that outlives the post sends readers to an empty page.
+        listed = self.client.get('/api/categories/').data
+        self.assertEqual([row['post_count'] for row in listed], [0])
+        tags = self.client.get('/api/tags/').data
+        self.assertEqual(tags['results'], [])
+
+    def test_an_archived_post_is_not_counted_by_its_category(self):
+        post = make_post(self.author, category=self.category)
+        post.is_archived = True
+        post.save(update_fields=['is_archived'])
+
+        self.client.force_authenticate(None)
+        listed = self.client.get('/api/categories/').data
+        self.assertEqual([row['post_count'] for row in listed], [0])
+
+    def test_a_preview_link_stops_working_once_the_post_is_trashed(self):
+        post = make_post(self.author, status=Post.Status.DRAFT)
+        url = f'/api/posts/{post.slug}/preview/?token={post.preview_token}'
+
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+
+        post.soft_delete()
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
+
     def test_an_editor_may_moderate_another_users_post(self):
         post = make_post(self.author)
         staff = make_user('staff@example.com', 'staff')

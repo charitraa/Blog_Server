@@ -119,6 +119,38 @@ class PostQuerySet(models.QuerySet):
         )
 
 
+def live_posts_q(prefix='posts'):
+    """
+    `PostQuerySet.published()` as a Q over a reverse relation, for counting.
+
+    Category and tag cards annotate their post count with a join rather than a
+    queryset, so the rule that decides what a visitor can open has to be
+    expressed twice. Keeping the second copy here means a count can never drift
+    from the list it labels — a trashed or archived post used to be counted by
+    the card and then be missing from the page it led to.
+
+    `visibility` is matched positively instead of excluding `private`, because
+    a negated Q inside an aggregate filter makes Django emit a subquery.
+    """
+    now = timezone.now()
+
+    def field(name):
+        return f'{prefix}__{name}'
+
+    return (
+        models.Q(**{field('deleted_at__isnull'): True})
+        & models.Q(**{field('is_archived'): False})
+        & models.Q(**{field('visibility__in'): (
+            Post.Visibility.PUBLIC, Post.Visibility.MEMBERS)})
+        & (
+            models.Q(**{field('status'): Post.Status.PUBLISHED,
+                        field('published_at__lte'): now})
+            | models.Q(**{field('status'): Post.Status.SCHEDULED,
+                          field('scheduled_for__lte'): now})
+        )
+    )
+
+
 class Post(models.Model):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'

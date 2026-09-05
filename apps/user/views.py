@@ -20,7 +20,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.post.models import Like, Post
+from apps.post.models import Like, Post, live_posts_q
 from blog_server import captcha
 from blog_server.pagination import StandardPagination
 
@@ -139,11 +139,11 @@ def send_login_code(user):
 
 def author_queryset():
     """Public users annotated with the counters their profile shows."""
-    published = Post.objects.filter(author=OuterRef('pk'), status=Post.Status.PUBLISHED)
+    published = Post.objects.published().filter(author=OuterRef('pk'))
     return (
         User.objects.filter(is_active=True)
         .annotate(
-            post_count=Count('author_post', filter=Q(author_post__status=Post.Status.PUBLISHED), distinct=True),
+            post_count=Count('author_post', filter=live_posts_q('author_post'), distinct=True),
             follower_count=Count('follower_set', distinct=True),
             following_count=Count('following_set', distinct=True),
         )
@@ -435,12 +435,14 @@ class MeDashboardView(APIView):
     def get(self, request):
         user = request.user
         # One aggregate over the author's posts instead of six separate counts.
-        totals = Post.objects.filter(author=user).aggregate(
+        # Trashed posts are excluded throughout: the dashboard counts have to
+        # agree with the list underneath them.
+        totals = Post.objects.alive().filter(author=user).aggregate(
             total_posts=Count('id', distinct=True),
             published_posts=Count('id', filter=Q(status=Post.Status.PUBLISHED), distinct=True),
             draft_posts=Count('id', filter=Q(status=Post.Status.DRAFT), distinct=True),
         )
-        views = Post.objects.filter(author=user).aggregate(
+        views = Post.objects.alive().filter(author=user).aggregate(
             total_views=Sum('view_count')
         )['total_views'] or 0
 

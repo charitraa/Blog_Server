@@ -16,7 +16,7 @@ from blog_server.permission import IsAuthorOrEditor
 from .filters import PostFilter
 from .models import (
     Bookmark, Category, EditorImage, Like, Post, PostRevision, PostView,
-    ReadingHistory, Series, SeriesPost, SeriesProgress, Tag,
+    ReadingHistory, Series, SeriesPost, SeriesProgress, Tag, live_posts_q,
 )
 from .serializers import (
     BookmarkStateSerializer,
@@ -338,7 +338,10 @@ class MyPostListView(generics.ListAPIView):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = Post.objects.filter(author=self.request.user).with_related().with_counts()
+        # `.alive()` matters: without it the author's own list is the one place
+        # a trashed post reappears, indistinguishable from a live one.
+        queryset = Post.objects.alive().filter(
+            author=self.request.user).with_related().with_counts()
         liked = Like.objects.filter(post=OuterRef('pk'), user=self.request.user)
         return queryset.annotate(is_liked=Exists(liked))
 
@@ -355,7 +358,7 @@ class CategoryListView(generics.ListAPIView):
 
     def get_queryset(self):
         return Category.objects.annotate(
-            post_count=Count('posts', filter=Q(posts__status=Post.Status.PUBLISHED), distinct=True)
+            post_count=Count('posts', filter=live_posts_q(), distinct=True)
         )
 
 
@@ -368,7 +371,7 @@ class CategoryDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return Category.objects.annotate(
-            post_count=Count('posts', filter=Q(posts__status=Post.Status.PUBLISHED), distinct=True)
+            post_count=Count('posts', filter=live_posts_q(), distinct=True)
         )
 
 
@@ -384,7 +387,7 @@ class TagListView(generics.ListAPIView):
 
     def get_queryset(self):
         return Tag.objects.annotate(
-            post_count=Count('posts', filter=Q(posts__status=Post.Status.PUBLISHED), distinct=True)
+            post_count=Count('posts', filter=live_posts_q(), distinct=True)
         ).filter(post_count__gt=0)
 
 
@@ -556,7 +559,7 @@ class PostPreviewView(APIView):
             )
 
         # Deliberately not `visible_to`: a valid token is what grants access.
-        post = Post.objects.with_related().with_counts().filter(slug=slug).first()
+        post = Post.objects.alive().with_related().with_counts().filter(slug=slug).first()
         if post is None or str(post.preview_token) != str(token):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 

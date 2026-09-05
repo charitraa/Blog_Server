@@ -49,7 +49,8 @@ class AdminStatsView(APIView):
         week_ago = timezone.now() - timedelta(days=7)
 
         # One aggregate per table rather than a count per statistic.
-        posts = Post.objects.aggregate(
+        # Trash is not part of the site's totals; it is the author's own bin.
+        posts = Post.objects.alive().aggregate(
             total=Count('id'),
             published=Count('id', filter=Q(status=Post.Status.PUBLISHED)),
             drafts=Count('id', filter=Q(status=Post.Status.DRAFT)),
