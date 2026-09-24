@@ -219,6 +219,26 @@ def thinking_knobs(model):
     return {'chat_template_kwargs': {'thinking': False}}
 
 
+def read_stream(response):
+    """Collect a server-sent-events chat completion into one reply."""
+    text, reasoning, finish_reason = [], False, None
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith('data:'):
+            continue
+        data = line[len('data:'):].strip()
+        if data == '[DONE]':
+            break
+        try:
+            choice = json.loads(data)['choices'][0]
+        except (ValueError, KeyError, IndexError) as exc:
+            raise Failed(f'Unexpected AI response: {data[:300]}') from exc
+        delta = choice.get('delta') or {}
+        text.append(delta.get('content') or '')
+        reasoning = reasoning or bool(delta.get('reasoning_content') or delta.get('reasoning'))
+        finish_reason = choice.get('finish_reason') or finish_reason
+    return {'text': ''.join(text), 'reasoning': reasoning, 'finish_reason': finish_reason}
+
+
 class Writer:
     """A thin client for the same NVIDIA endpoint the blog's own AI app uses."""
 
@@ -228,16 +248,45 @@ class Writer:
         self.model = model
         self.knobs = thinking_knobs(model)
 
+    def post(self, payload):
+        """
+        Send one streamed request, retrying once if the connection drops.
+
+        Streamed because a long answer from a reasoning model takes minutes,
+        and a non-streamed request sends nothing back until it is done. The
+        provider's gateway treats that silence as a dead connection and closes
+        it -- measured at about five minutes, well inside AI_TIMEOUT -- so the
+        run failed with RemoteDisconnected. Streaming keeps bytes moving, and
+        with stream=True the timeout applies between chunks, not to the whole
+        answer.
+        """
+        for attempt in (1, 2):
+            try:
+                response = requests.post(
+                    f'{self.base_url}/chat/completions',
+                    headers={'Authorization': f'Bearer {self.api_key}',
+                             'Content-Type': 'application/json',
+                             'Accept': 'text/event-stream'},
+                    json=dict(payload, stream=True),
+                    timeout=AI_TIMEOUT,
+                    stream=True,
+                )
+                if response.status_code >= 400:
+                    # The error body is small; reading it ends the stream.
+                    response.text
+                    return response, None
+                return response, read_stream(response)
+            except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
+                if attempt == 2:
+                    raise
+                print(f'  connection to the AI provider dropped ({exc}); retrying once',
+                      file=sys.stderr)
+                time.sleep(10)
+
     def chat(self, messages, max_tokens=4000, temperature=0.7, _retry=True):
         payload = {'model': self.model, 'messages': messages,
                    'max_tokens': max_tokens, 'temperature': temperature}
-        response = requests.post(
-            f'{self.base_url}/chat/completions',
-            headers={'Authorization': f'Bearer {self.api_key}',
-                     'Content-Type': 'application/json'},
-            json=dict(payload, **self.knobs),
-            timeout=AI_TIMEOUT,
-        )
+        response, reply = self.post(dict(payload, **self.knobs))
         if (response.status_code == 400 and self.knobs
                 and any(knob in response.text for knob in self.knobs)):
             # A model that does not know the knob rejects the whole request.
@@ -250,13 +299,7 @@ class Writer:
             print(f'  {self.model} rejected {list(self.knobs)}; retrying without',
                   file=sys.stderr)
             self.knobs = {}
-            response = requests.post(
-                f'{self.base_url}/chat/completions',
-                headers={'Authorization': f'Bearer {self.api_key}',
-                         'Content-Type': 'application/json'},
-                json=payload,
-                timeout=AI_TIMEOUT,
-            )
+            response, reply = self.post(payload)
         if response.status_code == 401:
             raise Failed('The AI provider rejected NVIDIA_API_KEY.')
         if response.status_code == 410:
@@ -266,19 +309,13 @@ class Writer:
             )
         if response.status_code >= 400:
             raise Failed(f'AI provider returned {response.status_code}: {response.text[:300]}')
-        try:
-            choice = response.json()['choices'][0]
-            message = choice['message']
-        except (ValueError, KeyError, IndexError) as exc:
-            raise Failed(f'Unexpected AI response: {response.text[:300]}') from exc
 
-        # `reasoning_content` is the model thinking aloud; the answer is
-        # `content`. An empty answer next to a full monologue means the budget
-        # ran out mid-thought, which more room usually fixes.
-        text = (message.get('content') or '').strip()
+        # `reasoning` is the model thinking aloud; the answer is `text`. An
+        # empty answer next to a full monologue means the budget ran out
+        # mid-thought, which more room usually fixes.
+        text = reply['text'].strip()
         if not text and _retry:
-            thought = bool(message.get('reasoning_content') or message.get('reasoning'))
-            if thought or choice.get('finish_reason') == 'length':
+            if reply['reasoning'] or reply['finish_reason'] == 'length':
                 print('  answer was empty (all budget went on reasoning); '
                       'retrying with double the room', file=sys.stderr)
                 return self.chat(messages, max_tokens=max_tokens * 2,

@@ -69,4 +69,6 @@ jobs:
           args=()
           if [ "$INPUT_DRY_RUN" = 'true' ]; then args+=(--dry-run); fi
           if [ -n "$INPUT_TOPIC" ];        then args+=(--topic "$INPUT_TOPIC"); fi
-          python automation/daily_post.py "${args[@]}"
+          # -u: unbuffered, so progress (stdout) and errors (stderr) appear
+          # in the log in the order they happened.
+          python -u automation/daily_post.py "${args[@]}"
