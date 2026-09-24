@@ -229,9 +229,13 @@ def read_stream(response):
         if data == '[DONE]':
             break
         try:
-            choice = json.loads(data)['choices'][0]
-        except (ValueError, KeyError, IndexError) as exc:
+            choices = json.loads(data)['choices']
+        except (ValueError, KeyError, TypeError) as exc:
             raise Failed(f'Unexpected AI response: {data[:300]}') from exc
+        # The last chunk carries only token usage, with an empty `choices`.
+        if not choices:
+            continue
+        choice = choices[0]
         delta = choice.get('delta') or {}
         text.append(delta.get('content') or '')
         reasoning = reasoning or bool(delta.get('reasoning_content') or delta.get('reasoning'))
