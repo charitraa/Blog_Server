@@ -38,12 +38,17 @@ ALLOWED_HTML = 'p, h2, h3, ul, ol, li, strong, em, blockquote, pre, code, a, hr'
 
 # Two very different waits. The blog answers in a second or so, except on the
 # first request of the day: Render's free tier stops the container when it is
-# idle and a cold start costs the best part of a minute. Writing a thousand
-# words is slower still — several minutes is normal for a reasoning model
-# asked for one long non-streamed answer, so it gets its own budget rather
-# than sharing the API one.
+# idle and a cold start costs the best part of a minute.
 TIMEOUT = int(os.environ.get('HTTP_TIMEOUT', 120))
-AI_TIMEOUT = int(os.environ.get('AI_TIMEOUT', 900))
+# The AI reply is streamed, so this is the longest silence tolerated between
+# chunks, not the time to write the whole post. A healthy stream sends tokens
+# (reasoning included) continuously; three minutes of nothing means the request
+# is stuck in the provider's queue, and a fresh attempt beats waiting it out --
+# one run sat for the full fifteen minutes the old limit allowed.
+AI_TIMEOUT = int(os.environ.get('AI_TIMEOUT', 180))
+AI_ATTEMPTS = int(os.environ.get('AI_ATTEMPTS', 4))
+# Statuses that mean "busy, try later" rather than "your request is wrong".
+RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 # The blog rejects a cover over MAX_IMAGE_UPLOAD_SIZE, 5MB by default
 # (blog_server/validators.py), and a rejected upload fails the whole post.
@@ -254,17 +259,19 @@ class Writer:
 
     def post(self, payload):
         """
-        Send one streamed request, retrying once if the connection drops.
+        Send one streamed request, retrying when the provider drops or stalls it.
 
         Streamed because a long answer from a reasoning model takes minutes,
         and a non-streamed request sends nothing back until it is done. The
         provider's gateway treats that silence as a dead connection and closes
-        it -- measured at about five minutes, well inside AI_TIMEOUT -- so the
-        run failed with RemoteDisconnected. Streaming keeps bytes moving, and
-        with stream=True the timeout applies between chunks, not to the whole
-        answer.
+        it after about five minutes, so the run failed with RemoteDisconnected.
+        Streaming keeps bytes moving, and with stream=True the timeout applies
+        between chunks, not to the whole answer.
+
+        The free endpoint also stalls or sheds load now and then: no bytes at
+        all, a 503, a dropped stream. Each is worth another go after a pause.
         """
-        for attempt in (1, 2):
+        for attempt in range(1, AI_ATTEMPTS + 1):
             try:
                 response = requests.post(
                     f'{self.base_url}/chat/completions',
@@ -272,20 +279,27 @@ class Writer:
                              'Content-Type': 'application/json',
                              'Accept': 'text/event-stream'},
                     json=dict(payload, stream=True),
-                    timeout=AI_TIMEOUT,
+                    timeout=(30, AI_TIMEOUT),
                     stream=True,
                 )
-                if response.status_code >= 400:
+                if response.status_code in RETRY_STATUSES and attempt < AI_ATTEMPTS:
+                    problem = f'returned {response.status_code}'
+                    response.close()
+                elif response.status_code >= 400:
                     # The error body is small; reading it ends the stream.
                     response.text
                     return response, None
-                return response, read_stream(response)
-            except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
-                if attempt == 2:
+                else:
+                    return response, read_stream(response)
+            except (requests.ConnectionError, requests.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as exc:
+                if attempt == AI_ATTEMPTS:
                     raise
-                print(f'  connection to the AI provider dropped ({exc}); retrying once',
-                      file=sys.stderr)
-                time.sleep(10)
+                problem = f'failed ({exc})'
+            pause = 15 * attempt
+            print(f'  AI provider {problem}; attempt {attempt + 1} of {AI_ATTEMPTS} '
+                  f'in {pause}s', file=sys.stderr)
+            time.sleep(pause)
 
     def chat(self, messages, max_tokens=4000, temperature=0.7, _retry=True):
         payload = {'model': self.model, 'messages': messages,

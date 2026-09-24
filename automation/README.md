@@ -181,7 +181,7 @@ python automation/daily_post.py --status draft     # publish nowhere public
 ```
 
 Other knobs, all environment variables: `NVIDIA_MODEL`, `MIN_WORDS`,
-`STRICT_TOPICS`, `REASONING_EFFORT`, `HTTP_TIMEOUT`, `AI_TIMEOUT`,
+`STRICT_TOPICS`, `REASONING_EFFORT`, `HTTP_TIMEOUT`, `AI_TIMEOUT`, `AI_ATTEMPTS`,
 `MAX_COVER_BYTES`, `TOPICS_FILE`.
 
 ## When it fails
