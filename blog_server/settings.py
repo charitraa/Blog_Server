@@ -67,6 +67,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves collected static files (admin, Swagger UI) from gunicorn. Django
+    # itself stops serving /static/ once DEBUG is off.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -188,7 +191,7 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 # the next deploy or restart. Uploads therefore go to Cloudinary in production.
 #
 # Static files are deliberately NOT moved there — they are built into the image
-# by `collectstatic` and served by the app, which is already reliable on Render.
+# by `collectstatic` and served by the app through WhiteNoise.
 
 CLOUDINARY_CLOUD_NAME = config('CLOUDINARY_CLOUD_NAME', default='')
 CLOUDINARY_API_KEY = config('CLOUDINARY_API_KEY', default='')
@@ -213,7 +216,7 @@ if USE_CLOUDINARY:
             'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
         },
         'staticfiles': {
-            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
         },
     }
 else:
@@ -222,7 +225,7 @@ else:
             'BACKEND': 'django.core.files.storage.FileSystemStorage',
         },
         'staticfiles': {
-            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
         },
     }
 
@@ -544,7 +547,7 @@ NVIDIA_EMBED_MODEL = config('NVIDIA_EMBED_MODEL', default='nvidia/nemotron-3-emb
 # multi-worker deployment would give every worker its own separate rate limit.
 # Backing it with a directory means all workers on a host share one budget with
 # no extra service to run.
-CACHE_DIR = os.path.join(BASE_DIR, '.cache')
+CACHE_DIR = config('CACHE_DIR', default='') or os.path.join(BASE_DIR, '.cache')
 
 CACHES = {
     'default': {

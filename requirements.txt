@@ -23,4 +23,7 @@ requests==2.32.5
 
 # Optional database driver (used when DB_ENGINE points at MySQL)
 PyMySQL==1.1.1
-gunicorn
+
+# Production server
+gunicorn==26.2.0
+whitenoise==6.12.0
