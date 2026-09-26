@@ -59,6 +59,10 @@ class Failed(RuntimeError):
     """Anything that should end the run with a red build and a clear reason."""
 
 
+class ServerError(Failed):
+    """The blog itself failed (5xx), as opposed to rejecting the request."""
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -151,6 +155,7 @@ class Blog:
             body = response.json()
             for post in body.get('results', []):
                 posts.append({
+                    'slug': post.get('slug') or '',
                     'title': (post.get('title') or '').strip(),
                     'subtitle': (post.get('subtitle') or '').strip(),
                     'tags': [tag.get('name', '') for tag in (post.get('tags') or [])],
@@ -199,6 +204,8 @@ class Blog:
             )
         if response.status_code == 429:
             raise Failed('Rate limited by the blog (THROTTLE_WRITE). Try again later.')
+        if response.status_code >= 500:
+            raise ServerError(f'Publishing failed ({response.status_code}): {response.text[:500]}')
         if response.status_code >= 400:
             raise Failed(f'Publishing failed ({response.status_code}): {response.text[:500]}')
         return response.json()
@@ -473,6 +480,33 @@ class Unsplash:
             except requests.RequestException:
                 pass
         return data
+
+
+def publish(blog, payload, cover, credit_html):
+    """
+    Create the post, falling back to no cover if the blog chokes on the image.
+
+    Returns (created post, cover actually used). A cover is optional, so a
+    server error while saving one must not cost the day's post -- but the error
+    can also arrive after the row was written, and retrying blind would
+    publish the same article twice. So the blog is asked first.
+    """
+    if cover is None:
+        return blog.create_post(payload), None
+    try:
+        with_credit = dict(payload, content=payload['content'] + '\n' + credit_html)
+        return blog.create_post(with_credit, cover=cover), cover
+    except ServerError as exc:
+        print(f'  the blog failed while saving with a cover ({exc}); checking whether '
+              f'it saved anyway', file=sys.stderr)
+
+    saved = next((post for post in blog.my_posts()
+                  if post['title'].lower() == payload['title'].strip().lower()), None)
+    if saved:
+        print('  the post was saved despite the error; not retrying')
+        return {'slug': saved['slug'], 'title': saved['title']}, cover
+    print('  retrying without the cover', file=sys.stderr)
+    return blog.create_post(payload), None
 
 
 def credit(photo):
@@ -804,7 +838,6 @@ def main():
                   f'(searched "{photo["query"]}")')
         if cover:
             print(f'   photo by {photo["author"]} (searched "{photo["query"]}")')
-            article['content'] += '\n' + credit(photo)
         else:
             print('   no usable cover; publishing without one')
     else:
@@ -820,7 +853,7 @@ def main():
 
     payload = dict(article, status=args.status)
     print(f'-> publishing as {args.status}')
-    created = blog.create_post(payload, cover=cover)
+    created, cover = publish(blog, payload, cover, credit(photo) if cover else '')
 
     slug = created.get('slug', '')
     site = env('BLOG_SITE_URL', '').rstrip('/')
