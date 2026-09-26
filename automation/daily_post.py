@@ -592,13 +592,36 @@ def write_post(writer, topic, categories, recent_titles):
     article = draft(writer, topic, categories, recent_titles)
     if article['_words'] < MIN_WORDS:
         print(f'  first draft was {article["_words"]} words; asking for a fuller one')
-        longer = draft(writer, topic, categories, recent_titles, short=article['_words'])
-        if longer['_words'] > article['_words']:
-            article = longer
+        try:
+            longer = draft(writer, topic, categories, recent_titles, short=article['_words'])
+        except (Failed, requests.RequestException) as exc:
+            # The first draft is already good enough to publish; a stalled or
+            # botched second request is not worth losing the day's post over.
+            print(f'  the fuller draft failed ({exc}); keeping the first one',
+                  file=sys.stderr)
+        else:
+            if longer['_words'] > article['_words']:
+                article = longer
     return article
 
 
-def draft(writer, topic, categories, recent_titles, short=None):
+def draft(writer, topic, categories, recent_titles, short=None, attempts=3):
+    """One usable article, asking again when the model's JSON is missing pieces."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return request_article(writer, topic, categories, recent_titles, short)
+        except Failed as exc:
+            # Parseable JSON is not the same as a usable post: the model
+            # sometimes answers with an object that has no title or a stub of a
+            # body, and one such reply used to end the run.
+            if attempt == attempts:
+                raise
+            print(f'  {exc} (attempt {attempt}/{attempts}); asking again',
+                  file=sys.stderr)
+            time.sleep(2 * attempt)
+
+
+def request_article(writer, topic, categories, recent_titles, short=None):
     category_list = ', '.join(f'{c["name"]} ({c["slug"]})' for c in categories) or 'none'
     avoid = '\n'.join(f'- {title}' for title in sorted(recent_titles)[-30:]) or '(none yet)'
     more = ''
@@ -647,6 +670,13 @@ Do not repeat or paraphrase these existing posts:
 
 def normalise(article, categories):
     """Turn a model's best effort into something the API will accept."""
+    if not isinstance(article, dict):
+        raise Failed(f'The model returned {type(article).__name__}, not a post object.')
+    # Some replies nest the post one level down: {"post": {...}}.
+    if 'title' not in article and len(article) == 1:
+        inner = next(iter(article.values()))
+        if isinstance(inner, dict):
+            article = inner
     title = collapse(article.get('title'))
     content = (article.get('content') or '').strip()
 
@@ -656,7 +686,8 @@ def normalise(article, categories):
     content = re.sub(r'<(/?)h1\b', r'<\1h2', content, flags=re.IGNORECASE)
 
     if len(title) < 3:
-        raise Failed('The model returned no usable title.')
+        raise Failed(f'The model returned no usable title (got keys: '
+                     f'{", ".join(sorted(map(str, article))) or "none"}).')
     body_text = re.sub(r'<[^>]+>', ' ', content)
     words = len(body_text.split())
     if words < 120:
