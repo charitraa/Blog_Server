@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -171,7 +172,9 @@ class Blog:
             return []
         body = response.json()
         rows = body if isinstance(body, list) else body.get('results', [])
-        return [{'slug': row['slug'], 'name': row['name']} for row in rows if row.get('slug')]
+        return [{'slug': row['slug'], 'name': row['name'],
+                 'description': row.get('description') or ''}
+                for row in rows if row.get('slug')]
 
     def create_post(self, payload, cover=None):
         """
@@ -521,14 +524,51 @@ def credit(photo):
 # ---------------------------------------------------------------------------
 
 def read_topics(path):
+    """
+    {category slug: [topics]}, in the order the sections appear in the file.
+
+    The order is the rotation, so an empty section still counts: it gets its
+    day, and the model invents that day's topic. Lines above the first
+    [section] header belong to programming, which is what the file held before
+    it was split by category.
+    """
+    sections = {}
     if not path.exists():
-        return []
-    lines = []
+        return sections
+    current = 'programming'
     for line in path.read_text(encoding='utf-8').splitlines():
         line = line.strip()
-        if line and not line.startswith('#'):
-            lines.append(line)
-    return lines
+        if not line or line.startswith('#'):
+            continue
+        header = re.fullmatch(r'\[\s*([a-z0-9-]+)\s*\]', line, flags=re.IGNORECASE)
+        if header:
+            current = header.group(1).lower()
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(line)
+    return sections
+
+
+def category_for_today(sections, categories, today=None):
+    """
+    Today's category: the sections taken in turn, one per calendar day.
+
+    Counted from the date rather than from what was posted last, so it needs
+    no state -- the job never writes to the repo (see Blog.my_posts). A missed
+    or failed day skips that category until the rotation comes round again,
+    which is the price of keeping no memory.
+    """
+    known = {c['slug'] for c in categories}
+    # A section naming a category the blog does not have would publish
+    # uncategorised every time it came round; leave it out and say so.
+    for slug in sections:
+        if known and slug not in known:
+            print(f'  [{slug}] in {TOPICS_FILE.name} is not a category on the blog; skipping it')
+    rotation = [slug for slug in sections if not known or slug in known]
+    if not rotation:
+        raise Failed(f'{TOPICS_FILE.name} has no section matching a blog category.')
+    today = today or datetime.now(timezone.utc).date()
+    return rotation[today.toordinal() % len(rotation)]
 
 
 # Words that say nothing about what a post is about. Kept deliberately short:
@@ -580,7 +620,30 @@ def covered_by(topic, posts, threshold=0.6):
     return None
 
 
-def choose_topic(topics, posts, recent_titles, writer, strict):
+# Who each category is written for. The blog's own category description says
+# what the category covers; this says who is reading it, which is what changes
+# the voice. A category not listed here gets AUDIENCE_DEFAULT.
+AUDIENCE = {
+    'programming': 'working software engineers',
+    'technology': 'curious readers who use technology daily but may not build it',
+    'cybersecurity': 'developers and careful everyday users who want to stay safe',
+    'design': 'people who build or care about interfaces, designers or not',
+    'business': 'founders, freelancers and people building products',
+    'education': 'students, self-learners and anyone who teaches',
+    'lifestyle': 'busy people, many of them students or desk workers',
+    'personal': 'general readers who enjoy a reflective essay',
+}
+AUDIENCE_DEFAULT = 'curious general readers'
+
+
+def describe(category):
+    """'Design (Interface, interaction and visual design.)' for a prompt."""
+    if category.get('description'):
+        return f'{category["name"]} ({category["description"].rstrip(".")})'
+    return category['name']
+
+
+def choose_topic(topics, posts, recent_titles, writer, strict, category):
     for topic in topics:
         match = covered_by(topic, posts)
         if match is None:
@@ -589,18 +652,18 @@ def choose_topic(topics, posts, recent_titles, writer, strict):
 
     if strict:
         raise Failed(
-            f'Every topic in {TOPICS_FILE.name} has been used and STRICT_TOPICS '
-            f'is set. Add more topics to resume.'
+            f'Every [{category["slug"]}] topic in {TOPICS_FILE.name} has been '
+            f'used and STRICT_TOPICS is set. Add more topics to resume.'
         )
 
-    print('  topic queue is empty — asking the model for a fresh one')
+    print(f'  no [{category["slug"]}] topics left — asking the model for a fresh one')
     recent = '\n'.join(f'- {title}' for title in sorted(recent_titles)[-40:])
     invented = writer.json_chat([{
         'role': 'user',
         'content': (
-            'Propose one fresh blog post topic for a working software '
-            'engineer\'s personal blog. It must not repeat or paraphrase any '
-            f'of these existing posts:\n{recent}\n\n'
+            f'Propose one fresh blog post topic in the category {describe(category)}, '
+            f'for {AUDIENCE.get(category["slug"], AUDIENCE_DEFAULT)}. It must '
+            f'not repeat or paraphrase any of these existing posts:\n{recent}\n\n'
             'Answer as {"topic": "..."} — a specific, concrete angle, not a '
             'broad survey.'
         ),
@@ -621,13 +684,13 @@ def choose_topic(topics, posts, recent_titles, writer, strict):
 MIN_WORDS = int(os.environ.get('MIN_WORDS', 700))
 
 
-def write_post(writer, topic, categories, recent_titles):
+def write_post(writer, topic, category, recent_titles):
     """Draft the post, asking once for more if the first attempt comes back thin."""
-    article = draft(writer, topic, categories, recent_titles)
+    article = draft(writer, topic, category, recent_titles)
     if article['_words'] < MIN_WORDS:
         print(f'  first draft was {article["_words"]} words; asking for a fuller one')
         try:
-            longer = draft(writer, topic, categories, recent_titles, short=article['_words'])
+            longer = draft(writer, topic, category, recent_titles, short=article['_words'])
         except (Failed, requests.RequestException) as exc:
             # The first draft is already good enough to publish; a stalled or
             # botched second request is not worth losing the day's post over.
@@ -639,11 +702,11 @@ def write_post(writer, topic, categories, recent_titles):
     return article
 
 
-def draft(writer, topic, categories, recent_titles, short=None, attempts=3):
+def draft(writer, topic, category, recent_titles, short=None, attempts=3):
     """One usable article, asking again when the model's JSON is missing pieces."""
     for attempt in range(1, attempts + 1):
         try:
-            return request_article(writer, topic, categories, recent_titles, short)
+            return request_article(writer, topic, category, recent_titles, short)
         except Failed as exc:
             # Parseable JSON is not the same as a usable post: the model
             # sometimes answers with an object that has no title or a stub of a
@@ -655,8 +718,8 @@ def draft(writer, topic, categories, recent_titles, short=None, attempts=3):
             time.sleep(2 * attempt)
 
 
-def request_article(writer, topic, categories, recent_titles, short=None):
-    category_list = ', '.join(f'{c["name"]} ({c["slug"]})' for c in categories) or 'none'
+def request_article(writer, topic, category, recent_titles, short=None):
+    audience = AUDIENCE.get(category['slug'], AUDIENCE_DEFAULT)
     avoid = '\n'.join(f'- {title}' for title in sorted(recent_titles)[-30:]) or '(none yet)'
     more = ''
     if short is not None:
@@ -667,9 +730,12 @@ def request_article(writer, topic, categories, recent_titles, short=None):
         'role': 'user',
         'content': f"""Write a complete blog post about: {topic}
 
-Audience: working software engineers. Voice: plain, specific, first person
+Category: {describe(category)}
+Audience: {audience}. Voice: plain, specific, first person
 where it helps. No filler, no "in today's fast-paced world", no restating the
 title in the first sentence. Prefer a concrete example over an abstraction.
+Do not invent personal biography (names, places, employers, dates) and present
+it as fact; reflect, argue and use clearly hypothetical examples instead.
 
 Length: 800-1200 words of body text.{more}
 
@@ -680,7 +746,6 @@ Return exactly this JSON object:
   "excerpt": "1-2 sentences, under 280 characters, no HTML",
   "content": "the post body as HTML",
   "tags": ["3 to 6 short lowercase tags"],
-  "category": "one slug from the list below, or null",
   "seo_title": "under 70 characters",
   "seo_description": "under 160 characters"
 }}
@@ -689,20 +754,19 @@ Rules for "content":
 - HTML only, using nothing but these tags: {ALLOWED_HTML}
 - No <h1>: the site renders the title as the page heading.
 - No markdown syntax anywhere, no code fences around the HTML.
-- Code samples go in <pre><code class="language-x">...</code></pre>.
+- Code samples, only if the subject calls for them, go in
+  <pre><code class="language-x">...</code></pre>.
 - Open with a paragraph, not a heading.
-
-Available categories: {category_list}
 
 Do not repeat or paraphrase these existing posts:
 {avoid}
 """
     }], max_tokens=8000)
 
-    return normalise(article, categories)
+    return normalise(article, category)
 
 
-def normalise(article, categories):
+def normalise(article, category):
     """Turn a model's best effort into something the API will accept."""
     if not isinstance(article, dict):
         raise Failed(f'The model returned {type(article).__name__}, not a post object.')
@@ -727,11 +791,6 @@ def normalise(article, categories):
     if words < 120:
         raise Failed(f'The generated body is too short ({words} words) to publish.')
 
-    valid_slugs = {c['slug'] for c in categories}
-    category = article.get('category')
-    if category not in valid_slugs:
-        category = None
-
     tags = []
     for tag in article.get('tags') or []:
         tag = collapse(str(tag))[:40]
@@ -744,7 +803,9 @@ def normalise(article, categories):
         'excerpt': collapse(article.get('excerpt'))[:300],
         'content': content,
         'tags': tags[:8],           # the serializer rejects a ninth
-        'category': category,
+        # Chosen by the rotation, not the model, so a day's post is always
+        # filed where the rotation said it would be.
+        'category': category['slug'],
         'seo_title': collapse(article.get('seo_title'))[:70],
         'seo_description': collapse(article.get('seo_description'))[:200],
         '_words': words,
@@ -774,6 +835,9 @@ def main():
     parser.add_argument('--dry-run', action='store_true',
                         help='Generate and print the post without publishing.')
     parser.add_argument('--topic', help='Write about this instead of the queue.')
+    parser.add_argument('--category', default=env('POST_CATEGORY'),
+                        help="Category slug to write in instead of today's turn "
+                             'in the rotation.')
     parser.add_argument('--status', default=os.environ.get('POST_STATUS', 'published'),
                         choices=['published', 'draft'],
                         help='What to create the post as (default: published).')
@@ -800,17 +864,29 @@ def main():
     categories = blog.categories()
     print(f'   {len(posts)} existing post(s), {len(categories)} categories')
 
+    sections = read_topics(TOPICS_FILE)
+    wanted = (args.category or '').strip().lower() or category_for_today(sections, categories)
+    by_slug = {c['slug']: c for c in categories}
+    if categories and wanted not in by_slug:
+        raise Failed(f'"{wanted}" is not a category on the blog '
+                     f'(have: {", ".join(sorted(by_slug))}).')
+    # If the category list could not be fetched, still write in the rotation's
+    # voice; normalise() files it, and the API rejects a slug it does not know.
+    category = by_slug.get(wanted) or {'slug': wanted, 'name': wanted.title(), 'description': ''}
+    print(f'-> category: {category["name"]}')
+
     if args.topic:
         topic, source = args.topic, 'argument'
     else:
         topic, source = choose_topic(
-            read_topics(TOPICS_FILE), posts, titles, writer,
+            sections.get(wanted, []), posts, titles, writer,
             strict=env('STRICT_TOPICS', '') not in ('', '0', 'false', 'False'),
+            category=category,
         )
     print(f'-> topic ({source}): {topic}')
 
     print('-> writing')
-    article = write_post(writer, topic, categories, titles)
+    article = write_post(writer, topic, category, titles)
     words = article.pop('_words')
     print(f'   "{article["title"]}" — {words} words, tags: {", ".join(article["tags"]) or "none"}')
 
@@ -845,6 +921,7 @@ def main():
 
     if args.dry_run:
         summarise(['### Dry run — nothing published',
+                   f'**Category:** {category["name"]}',
                    f'**Topic:** {topic}',
                    f'**Title:** {article["title"]}',
                    f'**Words:** {words}', '', '<details><summary>Body</summary>', '',
@@ -860,6 +937,7 @@ def main():
     link = f'{site}/post/{slug}' if site else f'{blog.base}/api/posts/{slug}/'
 
     summarise([f'### Published: {created.get("title")}',
+               f'- **Category:** {category["name"]}',
                f'- **Topic:** {topic}',
                f'- **Words:** {words}',
                f'- **Tags:** {", ".join(article["tags"]) or "none"}',

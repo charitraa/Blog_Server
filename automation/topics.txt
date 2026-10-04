@@ -1,17 +1,21 @@
-# One topic per line. The daily job takes the first line it has not already
-# covered, writes a post about it and publishes it.
+# Topics, grouped by category. Each day the job writes about one category,
+# taking them in the order the [sections] appear below and wrapping round, so
+# with eight sections every category gets a post every eight days. The section
+# name is the category's slug on the blog (GET /api/categories/).
 #
+# Within a section the job takes the first topic it has not already covered.
 # Nothing here is ticked off in a file. The job asks the blog what it has
 # published and matches those titles back against this list, so the queue
 # survives without the job ever writing to the repo.
 #
-# Lines starting with '#' and blank lines are ignored. Edit freely: adding a
-# topic anywhere in the file is enough, order is top to bottom.
+# Lines starting with '#' and blank lines are ignored. Edit freely: add a topic
+# to any section, add or reorder sections to change the rotation.
 #
-# When every topic here has been used the job asks the model for a fresh one
-# in the spirit of the recent posts, so the blog does not stop. Set
-# STRICT_TOPICS=1 in the workflow if you would rather it stop and wait for you.
+# When a section runs out the job asks the model for a fresh topic in that
+# category, so the blog does not stop. Set STRICT_TOPICS=1 in the workflow if
+# you would rather it stop and wait for you.
 
+[programming]
 Why the best code review comment is a question, not a correction
 What a database index actually costs you on every write
 Reading a stack trace from the bottom up
@@ -32,3 +36,59 @@ Caching is easy; invalidation is the whole job
 Why migrations should be backwards compatible for one release
 The quiet cost of a dependency you added in five minutes
 Writing tests that fail for the right reason
+
+[technology]
+How a phone knows where it is when GPS cannot see the sky
+What actually happens between pressing Enter and a page appearing
+Why your laptop battery lies about how much time is left
+The real cost of running a model locally versus calling an API
+How a CDN decides which server answers you
+What changes when a country's internet traffic goes through one cable
+
+[cybersecurity]
+Why a password manager is safer than the password you can remember
+Phishing emails that fooled security people, and what gave them away
+What two-factor authentication protects you from, and what it does not
+How a stolen session cookie skips the login page entirely
+The security questions to ask before installing a browser extension
+What happens in the first hour after a company discovers a breach
+
+[design]
+Why the most-used button should not be the most colourful one
+Empty states: the screen every user sees first and designers see last
+What makes a form feel fast even when the server is slow
+Designing for the person holding a phone in one hand on a bus
+Why dark mode is more than inverting the colours
+The difference between a consistent interface and a boring one
+
+[business]
+Why the first ten customers matter more than the first ten thousand
+Pricing a side project: what to charge when nobody knows you yet
+What a small team loses when it hires too fast
+Saying no to a feature request without losing the customer
+The hidden costs of a free tier
+How to tell a good market from a busy one
+
+[education]
+Why explaining something out loud shows you what you do not understand
+Learning a new skill in twenty minutes a day, and why it works
+The difference between practice that feels productive and practice that is
+How to read a hard book you are not ready for
+Why worked examples beat lectures for beginners
+Teaching a concept by starting with the mistake everyone makes
+
+[lifestyle]
+A desk setup that is kind to your back, on a student's budget
+What a week without notifications taught me about attention
+Sleep is a skill: small changes that add up
+Walking as a thinking tool
+Cooking simple meals in batches when you have no time
+Keeping a hobby that has nothing to do with work
+
+[personal]
+What an abandoned project can still teach you
+Things first-year students wish someone had told them
+Living between two languages
+Why the advice we ignore is often the advice we needed
+The case for writing in public before you feel ready
+Small evening habits that quietly change a week

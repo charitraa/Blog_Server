@@ -1,6 +1,7 @@
 # One post a day, unattended
 
-`daily_post.py` picks the next unused topic from `topics.txt`, has a model
+`daily_post.py` picks today's category, takes the next unused topic in it
+from `topics.txt`, has a model
 write the post, and publishes it to the live blog through the public API. The
 schedule lives in `.github/workflows/daily-post.yml`, so GitHub runs it — the
 blog itself is on Render's free tier, which has no cron and no shell.
@@ -89,8 +90,18 @@ Then run it once for real, and leave the schedule to it.
 
 ## How it decides what to write
 
-`topics.txt` is a plain list, top to bottom. The job takes the first line it
-has not already covered.
+`topics.txt` is split into `[sections]`, one per blog category, named by the
+category's slug. **Each day is one category's turn**: the sections are taken in
+the order they appear and wrap round, so with eight sections every category
+gets a post every eight days. The turn is worked out from the date
+(`category_for_today`), so it needs no state — the price is that a missed day
+skips that category until it comes round again. Reorder the sections to change
+the order; add one with a category slug to add it to the rotation.
+
+Within today's section the job takes the first line it has not already
+covered, writes for that category's readers (`AUDIENCE` in the script), and
+files the post under that category. *Run workflow* has a **category** choice to
+override the rotation for one run.
 
 **It keeps no state file and never pushes to this repo.** It used to commit a
 `posted.json` back after each run, which meant a push a day — and a push
@@ -101,8 +112,8 @@ matches those against the topic list on significant words. "What a database
 index actually costs you on every write" and the post it became, "Database
 indexes: the hidden cost on every write", share enough of them to match.
 
-When the list runs out the job asks the model for a fresh topic rather than
-stopping, giving it your recent titles so it doesn't circle back. Set
+When a section runs out the job asks the model for a fresh topic in that
+category rather than stopping, giving it your recent titles so it doesn't circle back. Set
 `STRICT_TOPICS=1` if you would rather it fail loudly and wait for you to add
 more.
 
@@ -177,10 +188,11 @@ export NVIDIA_API_KEY=nvapi-...
 
 python automation/daily_post.py --dry-run          # write it, publish nothing
 python automation/daily_post.py --topic "..."      # jump the queue
+python automation/daily_post.py --category design  # out of turn
 python automation/daily_post.py --status draft     # publish nowhere public
 ```
 
-Other knobs, all environment variables: `NVIDIA_MODEL`, `MIN_WORDS`,
+Other knobs, all environment variables: `NVIDIA_MODEL`, `POST_CATEGORY`, `MIN_WORDS`,
 `STRICT_TOPICS`, `REASONING_EFFORT`, `HTTP_TIMEOUT`, `AI_TIMEOUT`, `AI_ATTEMPTS`,
 `MAX_COVER_BYTES`, `TOPICS_FILE`.
 
